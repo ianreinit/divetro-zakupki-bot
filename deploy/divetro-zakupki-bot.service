@@ -1,0 +1,21 @@
+[Unit]
+Description=Divetro Zakupki Telegram bot (заявки и оплаты)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Отдельный пользователь под этого бота (изоляция от Бертама и root)
+User=divetro
+Group=divetro
+WorkingDirectory=/opt/divetro-zakupki-bot
+# .env читается самим ботом (python-dotenv) из WorkingDirectory
+ExecStart=/opt/divetro-zakupki-bot/venv/bin/python /opt/divetro-zakupki-bot/main.py
+Restart=always
+RestartSec=5
+# Немного изоляции
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

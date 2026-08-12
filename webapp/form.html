@@ -1,0 +1,208 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>Новая заявка</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<style>
+  :root {
+    --bg: var(--tg-theme-bg-color, #ffffff);
+    --text: var(--tg-theme-text-color, #1c1c1e);
+    --hint: var(--tg-theme-hint-color, #8e8e93);
+    --section-bg: var(--tg-theme-secondary-bg-color, #f2f2f7);
+    --accent: var(--tg-theme-button-color, #2ea6ff);
+    --accent-text: var(--tg-theme-button-text-color, #ffffff);
+    --field-bg: var(--tg-theme-bg-color, #ffffff);
+    --border: rgba(128,128,128,.28);
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 16px;
+    font: 16px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background: var(--section-bg); color: var(--text);
+    -webkit-tap-highlight-color: transparent;
+  }
+  h1 { font-size: 20px; margin: 4px 0 16px; }
+  label { display: block; font-size: 13px; color: var(--hint); margin: 14px 0 6px; }
+  input, select {
+    width: 100%; padding: 12px 14px; font-size: 16px;
+    color: var(--text); background: var(--field-bg);
+    border: 1px solid var(--border); border-radius: 12px; outline: none;
+    appearance: none; -webkit-appearance: none;
+  }
+  input:focus, select:focus { border-color: var(--accent); }
+  select {
+    background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 24 24' fill='none' stroke='%238e8e93' stroke-width='2.5'><path d='M6 9l6 6 6-6'/></svg>");
+    background-repeat: no-repeat; background-position: right 14px center; padding-right: 40px;
+  }
+  .file-btn {
+    display: flex; align-items: center; gap: 10px;
+    padding: 14px; border: 1px dashed var(--border); border-radius: 12px;
+    background: var(--field-bg); color: var(--hint); cursor: pointer;
+  }
+  .file-btn.filled { color: var(--text); border-style: solid; border-color: var(--accent); }
+  .file-btn svg { flex: none; }
+  #file { display: none; }
+  #preview { margin-top: 10px; max-width: 100%; max-height: 220px; border-radius: 12px; display: none; }
+  .hint-line { font-size: 12px; color: var(--hint); margin-top: 6px; }
+  #error {
+    display: none; margin-top: 14px; padding: 12px 14px; border-radius: 12px;
+    background: rgba(255,59,48,.12); color: #ff3b30; font-size: 14px;
+  }
+  #submit {
+    position: sticky; bottom: 0; margin-top: 24px; width: 100%;
+    padding: 15px; font-size: 16px; font-weight: 600;
+    color: var(--accent-text); background: var(--accent);
+    border: none; border-radius: 12px; cursor: pointer;
+  }
+  #submit:disabled { opacity: .6; cursor: default; }
+</style>
+</head>
+<body>
+  <h1>Новая заявка на закупку</h1>
+
+  <label for="sector">Сектор</label>
+  <select id="sector"></select>
+
+  <label for="supplier">Поставщик</label>
+  <input id="supplier" type="text" placeholder="Например: ООО Краски" autocomplete="off">
+
+  <label for="amount">Сумма</label>
+  <input id="amount" type="text" inputmode="decimal" placeholder="Например: 42500" autocomplete="off">
+
+  <label for="naryad">Номер наряда / проекта</label>
+  <input id="naryad" type="text" placeholder="Например: 281-26" autocomplete="off">
+
+  <label>Счёт (фото или PDF)</label>
+  <label class="file-btn" id="fileBtn" for="file">
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M17 8l-5-5-5 5M12 3v12"/></svg>
+    <span id="fileLabel">Прикрепить файл счёта</span>
+  </label>
+  <input id="file" type="file" accept="image/*,application/pdf">
+  <img id="preview" alt="">
+  <div class="hint-line">Без счёта заявку отправить нельзя.</div>
+
+  <div id="error"></div>
+
+  <button id="submit">Отправить заявку</button>
+
+<script>
+  const tg = window.Telegram ? window.Telegram.WebApp : null;
+  if (tg) { tg.ready(); tg.expand(); }
+
+  const $ = (id) => document.getElementById(id);
+  const errorBox = $("error");
+  const submitBtn = $("submit");
+
+  function showError(msg) { errorBox.textContent = msg; errorBox.style.display = "block"; }
+  function clearError() { errorBox.style.display = "none"; }
+
+  // Заполняем список секторов из бэкенда (единый источник — config.py),
+  // затем подставляем закреплённый сектор сотрудника, если он есть.
+  fetch("config").then(r => r.json()).then(cfg => {
+    const sel = $("sector");
+    (cfg.sectors || []).forEach(s => {
+      const opt = document.createElement("option");
+      opt.value = s; opt.textContent = s; sel.appendChild(opt);
+    });
+    return fetchMySector();
+  }).catch(() => showError("Не удалось загрузить список секторов."));
+
+  function fetchMySector() {
+    const fd = new FormData();
+    fd.append("initData", tg ? tg.initData : "");
+    return fetch("mysector", { method: "POST", body: fd })
+      .then(r => r.json())
+      .then(info => {
+        if (!info) return;
+        const sel = $("sector");
+        // Директору добавляем категорию «Административные» (аренда и т.п.).
+        if (info.admin_sector) {
+          const opt = document.createElement("option");
+          opt.value = info.admin_sector; opt.textContent = info.admin_sector;
+          sel.appendChild(opt);
+        }
+        if (!info.sector) return;
+        sel.value = info.sector;
+        if (info.locked) {
+          sel.disabled = true;   // значение всё равно отправляется (берём из .value)
+          const note = document.createElement("div");
+          note.className = "hint-line";
+          note.textContent = "Ваш сектор: " + info.sector + " (закреплён)";
+          sel.parentNode.insertBefore(note, sel.nextSibling);
+        }
+      })
+      .catch(() => {});
+  }
+
+  // Превью выбранного файла
+  $("file").addEventListener("change", (e) => {
+    const f = e.target.files[0];
+    const btn = $("fileBtn"), label = $("fileLabel"), prev = $("preview");
+    if (!f) { label.textContent = "Прикрепить файл счёта"; btn.classList.remove("filled"); prev.style.display = "none"; return; }
+    label.textContent = f.name;
+    btn.classList.add("filled");
+    if (f.type.startsWith("image/")) {
+      prev.src = URL.createObjectURL(f); prev.style.display = "block";
+    } else {
+      prev.style.display = "none";
+    }
+  });
+
+  submitBtn.addEventListener("click", async () => {
+    clearError();
+    const sector = $("sector").value;
+    const supplier = $("supplier").value.trim();
+    const amount = $("amount").value.trim();
+    const naryad = $("naryad").value.trim();
+    const file = $("file").files[0];
+
+    if (!supplier) return showError("Укажите поставщика.");
+    if (!amount) return showError("Укажите сумму.");
+    if (!naryad) return showError("Укажите номер наряда.");
+    if (!file) return showError("Прикрепите фото или PDF счёта.");
+
+    const fd = new FormData();
+    fd.append("initData", tg ? tg.initData : "");
+    fd.append("sector", sector);
+    fd.append("supplier", supplier);
+    fd.append("amount", amount);
+    fd.append("naryad", naryad);
+    fd.append("file", file);
+
+    submitBtn.disabled = true;
+    submitBtn.textContent = "Отправляю…";
+    try {
+      const resp = await fetch("submit", { method: "POST", body: fd });
+      const data = await resp.json();
+      if (data.ok) {
+        if (tg) { tg.HapticFeedback && tg.HapticFeedback.notificationOccurred("success"); tg.close(); }
+        else { document.body.innerHTML = "<h1>Заявка " + data.request_no + " отправлена.</h1>"; }
+      } else {
+        showError(errorText(data.error));
+        submitBtn.disabled = false; submitBtn.textContent = "Отправить заявку";
+      }
+    } catch (e) {
+      showError("Сеть недоступна, попробуйте ещё раз.");
+      submitBtn.disabled = false; submitBtn.textContent = "Отправить заявку";
+    }
+  });
+
+  function errorText(code) {
+    const map = {
+      auth_failed: "Не удалось подтвердить, что заявку отправляете вы. Откройте форму через кнопку в боте.",
+      no_user: "Не удалось определить отправителя. Откройте форму через кнопку в боте.",
+      not_allowed: "Вы не закреплены за сектором. Обратитесь к директору, чтобы он вас добавил.",
+      bad_sector: "Выберите сектор из списка.",
+      empty_fields: "Заполните поставщика и наряд.",
+      bad_amount: "Сумма должна быть числом больше нуля.",
+      no_file: "Прикрепите фото или PDF счёта.",
+      file_too_big: "Файл слишком большой (максимум 15 МБ).",
+      publish_failed: "Не получилось опубликовать заявку. Попробуйте ещё раз.",
+    };
+    return map[code] || "Что-то пошло не так. Попробуйте ещё раз.";
+  }
+</script>
+</body>
+</html>

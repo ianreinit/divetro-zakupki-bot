@@ -1,0 +1,17 @@
+# Секреты и данные — НИКОГДА не коммитить
+.env
+zakupki.db
+*.db
+
+# Python
+venv/
+__pycache__/
+*.pyc
+.Python
+
+# macOS
+.DS_Store
+
+# Артефакты
+invite_qr.png
+*.tgz
