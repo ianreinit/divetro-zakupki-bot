@@ -13,9 +13,11 @@ import hmac
 import json
 import logging
 import os
+from io import BytesIO
 from urllib.parse import parse_qsl
 
 from aiohttp import web
+from telegram import InputFile
 
 import config
 import core
@@ -25,6 +27,7 @@ log = logging.getLogger("zakupki-web")
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 FORM_HTML = os.path.join(HERE, "webapp", "form.html")
+PAY_HTML = os.path.join(HERE, "webapp", "pay.html")
 
 MAX_FILE_BYTES = 15 * 1024 * 1024  # 15 МБ — с запасом на фото/PDF счёта
 
@@ -172,6 +175,89 @@ async def handle_submit(request: web.Request) -> web.Response:
     return web.json_response({"ok": True, "request_no": request_no})
 
 
+async def handle_pay(request: web.Request) -> web.Response:
+    # Отдаём окно загрузки платёжки (pay.html). Открывается кнопкой у бухгалтера.
+    return web.FileResponse(PAY_HTML)
+
+
+async def handle_attach_payment(request: web.Request) -> web.Response:
+    """Приём платёжки из окна загрузки: подпись → бухгалтер → цепляем к заявке → рассылка.
+
+    Логика повторяет старый путь (accountant_payment_received в main.py), но файл
+    приходит из Web App, а не отдельным сообщением. FR-3..FR-6.
+    """
+    bot = request.app["bot"]
+    try:
+        reader = await request.multipart()
+    except Exception:
+        return web.json_response({"ok": False, "error": "bad_request"}, status=400)
+
+    fields = {}
+    file_bytes = None
+    file_name = None
+    file_ctype = None
+
+    async for part in reader:
+        if part.name == "file":
+            file_name = part.filename or "payment"
+            file_ctype = (part.headers.get("Content-Type") or "").lower()
+            buf = bytearray()
+            while True:
+                chunk = await part.read_chunk()
+                if not chunk:
+                    break
+                buf.extend(chunk)
+                if len(buf) > MAX_FILE_BYTES:
+                    return web.json_response(
+                        {"ok": False, "error": "file_too_big"}, status=413)
+            file_bytes = bytes(buf)
+        else:
+            fields[part.name] = (await part.text()).strip()
+
+    # 1) Подпись — кто отправил (FR-3).
+    init = verify_init_data(fields.get("initData", ""), config.BOT_TOKEN)
+    if init is None:
+        return web.json_response({"ok": False, "error": "auth_failed"}, status=403)
+    try:
+        user = json.loads(init.get("user", "{}"))
+        uid = int(user["id"])
+    except (ValueError, KeyError):
+        return web.json_response({"ok": False, "error": "no_user"}, status=403)
+
+    # 2) Прикреплять может только бухгалтер (FR-3).
+    if not core.is_accountant(uid):
+        return web.json_response({"ok": False, "error": "not_allowed"}, status=403)
+
+    # 3) Заявка (req из ?req=<id>, не подписан — но проверяем существование).
+    try:
+        req_id = int(fields.get("req", ""))
+    except ValueError:
+        return web.json_response({"ok": False, "error": "bad_request"}, status=400)
+    req = db.get_by_id(req_id)
+    if req is None:
+        return web.json_response({"ok": False, "error": "not_found"}, status=404)
+    if not file_bytes:
+        return web.json_response({"ok": False, "error": "no_file"}, status=400)
+
+    is_document = "pdf" in file_ctype or (file_name or "").lower().endswith(".pdf")
+
+    # 4) Отправляем файл бухгалтеру — это и подтверждение (FR-6), и способ получить
+    #    постоянный file_id для пересылки запросившим.
+    try:
+        caption = f"✅ Платёжка по наряду {req['naryad']} прикреплена."
+        media = InputFile(BytesIO(file_bytes), filename=file_name or "payment")
+        _, file_id = await core._send_card(bot, uid, media, caption, is_document)
+    except Exception as e:
+        log.exception("attach_payment: не удалось отправить платёжку бухгалтеру: %s", e)
+        return web.json_response({"ok": False, "error": "publish_failed"}, status=500)
+
+    # 5) Сохраняем file_id и рассылаем всем из очереди, очередь очищается (FR-5).
+    db.set_payment_file(req_id, file_id, 1 if is_document else 0)
+    req = db.get_by_id(req_id)
+    await core.deliver_payment_to_pending(bot, req)
+    return web.json_response({"ok": True})
+
+
 def build_web_app(bot) -> web.Application:
     app = web.Application()
     app["bot"] = bot
@@ -179,6 +265,8 @@ def build_web_app(bot) -> web.Application:
     app.router.add_get("/config", handle_config)
     app.router.add_post("/mysector", handle_mysector)
     app.router.add_post("/submit", handle_submit)
+    app.router.add_get("/pay", handle_pay)
+    app.router.add_post("/attach_payment", handle_attach_payment)
     return app
 
 
@@ -189,6 +277,6 @@ async def start_webserver(bot):
     await runner.setup()
     site = web.TCPSite(runner, config.WEB_HOST, config.WEB_PORT)
     await site.start()
-    log.info("Веб-сервер формы слушает http://%s:%s (форма: /form, приём: /submit)",
-             config.WEB_HOST, config.WEB_PORT)
+    log.info("Веб-сервер формы слушает http://%s:%s (форма: /form, приём: /submit, "
+             "платёжка: /pay → /attach_payment)", config.WEB_HOST, config.WEB_PORT)
     return runner

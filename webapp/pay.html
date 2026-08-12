@@ -1,0 +1,140 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>Прикрепить платёжку</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<style>
+  :root {
+    --bg: var(--tg-theme-bg-color, #ffffff);
+    --text: var(--tg-theme-text-color, #1c1c1e);
+    --hint: var(--tg-theme-hint-color, #8e8e93);
+    --section-bg: var(--tg-theme-secondary-bg-color, #f2f2f7);
+    --accent: var(--tg-theme-button-color, #2ea6ff);
+    --accent-text: var(--tg-theme-button-text-color, #ffffff);
+    --field-bg: var(--tg-theme-bg-color, #ffffff);
+    --border: rgba(128,128,128,.28);
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 16px;
+    font: 16px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background: var(--section-bg); color: var(--text);
+    -webkit-tap-highlight-color: transparent;
+  }
+  h1 { font-size: 20px; margin: 4px 0 6px; }
+  .file-btn {
+    display: flex; align-items: center; gap: 10px; margin-top: 14px;
+    padding: 14px; border: 1px dashed var(--border); border-radius: 12px;
+    background: var(--field-bg); color: var(--hint); cursor: pointer;
+  }
+  .file-btn.filled { color: var(--text); border-style: solid; border-color: var(--accent); }
+  .file-btn svg { flex: none; }
+  #file { display: none; }
+  #preview { margin-top: 10px; max-width: 100%; max-height: 220px; border-radius: 12px; display: none; }
+  .hint-line { font-size: 12px; color: var(--hint); margin-top: 6px; }
+  #error {
+    display: none; margin-top: 14px; padding: 12px 14px; border-radius: 12px;
+    background: rgba(255,59,48,.12); color: #ff3b30; font-size: 14px;
+  }
+  #submit {
+    position: sticky; bottom: 0; margin-top: 24px; width: 100%;
+    padding: 15px; font-size: 16px; font-weight: 600;
+    color: var(--accent-text); background: var(--accent);
+    border: none; border-radius: 12px; cursor: pointer;
+  }
+  #submit:disabled { opacity: .6; cursor: default; }
+</style>
+</head>
+<body>
+  <h1>Прикрепить платёжку</h1>
+  <div class="hint-line" id="reqline"></div>
+
+  <div class="file-btn" id="fileBtn">
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M17 8l-5-5-5 5M12 3v12"/></svg>
+    <span id="fileLabel">Выбрать платёжку</span>
+  </div>
+  <input id="file" type="file" accept="image/*,application/pdf">
+  <img id="preview" alt="">
+  <div class="hint-line">Фото или PDF, до 15 МБ.</div>
+
+  <div id="error"></div>
+
+  <button id="submit" disabled>Отправить</button>
+
+<script>
+  const tg = window.Telegram ? window.Telegram.WebApp : null;
+  if (tg) { tg.ready(); tg.expand(); }
+
+  const $ = (id) => document.getElementById(id);
+  const params = new URLSearchParams(location.search);
+  const reqId = params.get("req") || "";
+  $("reqline").textContent = reqId ? ("Заявка № " + reqId) : "";
+
+  const fileInput = $("file");
+  const submitBtn = $("submit");
+  const errorBox = $("error");
+
+  function showError(msg) { errorBox.textContent = msg; errorBox.style.display = "block"; }
+  function clearError() { errorBox.style.display = "none"; }
+
+  // Пикер открываем явным JS-кликом — надёжнее, чем <label for> внутри webview.
+  $("fileBtn").addEventListener("click", (e) => { e.preventDefault(); fileInput.click(); });
+
+  fileInput.addEventListener("change", () => {
+    const f = fileInput.files[0];
+    const label = $("fileLabel"), btn = $("fileBtn"), prev = $("preview");
+    if (!f) {
+      label.textContent = "Выбрать платёжку"; btn.classList.remove("filled");
+      prev.style.display = "none"; submitBtn.disabled = true; return;
+    }
+    label.textContent = f.name; btn.classList.add("filled"); submitBtn.disabled = false;
+    if (f.type.startsWith("image/")) { prev.src = URL.createObjectURL(f); prev.style.display = "block"; }
+    else { prev.style.display = "none"; }
+  });
+
+  submitBtn.addEventListener("click", async () => {
+    clearError();
+    const f = fileInput.files[0];
+    if (!f) return showError("Выберите файл платёжки.");
+
+    const fd = new FormData();
+    fd.append("initData", tg ? tg.initData : "");
+    fd.append("req", reqId);
+    fd.append("file", f);
+
+    submitBtn.disabled = true;
+    submitBtn.textContent = "Отправляю…";
+    try {
+      const resp = await fetch("attach_payment", { method: "POST", body: fd });
+      const data = await resp.json();
+      if (data.ok) {
+        if (tg) { tg.HapticFeedback && tg.HapticFeedback.notificationOccurred("success"); tg.close(); }
+        else { document.body.innerHTML = "<h1>Платёжка прикреплена.</h1>"; }
+      } else {
+        showError(errorText(data.error));
+        submitBtn.disabled = false; submitBtn.textContent = "Отправить";
+      }
+    } catch (e) {
+      showError("Сеть недоступна, попробуйте ещё раз.");
+      submitBtn.disabled = false; submitBtn.textContent = "Отправить";
+    }
+  });
+
+  function errorText(code) {
+    const map = {
+      auth_failed: "Не удалось подтвердить вашу личность. Откройте окно через кнопку в боте.",
+      no_user: "Не удалось определить отправителя. Откройте окно через кнопку в боте.",
+      not_allowed: "Прикреплять платёжку может только бухгалтер.",
+      not_found: "Заявка не найдена.",
+      no_file: "Выберите фото или PDF платёжки.",
+      file_too_big: "Файл слишком большой (максимум 15 МБ).",
+      bad_request: "Некорректный запрос. Откройте окно через кнопку в боте.",
+      publish_failed: "Не получилось прикрепить платёжку. Попробуйте ещё раз.",
+    };
+    return map[code] || "Что-то пошло не так. Попробуйте ещё раз.";
+  }
+</script>
+</body>
+</html>

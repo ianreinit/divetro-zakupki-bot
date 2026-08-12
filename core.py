@@ -15,7 +15,7 @@ import logging
 from datetime import datetime
 from io import BytesIO
 
-from telegram import InputFile, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import InputFile, InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
 
 import config
 import db
@@ -111,7 +111,18 @@ def needpay_kb(req_id):
 
 
 def attach_kb(req_id):
-    """Кнопка «Прикрепить платёжку» (для бухгалтера)."""
+    """Кнопка «Прикрепить платёжку» (для бухгалтера).
+
+    Есть PAYAPP_URL → открывает окно загрузки (Web App) с ?req=<id>: бухгалтер
+    выбирает файл в окне, тот цепляется к заявке (FR-1, FR-2).
+    Пусто → запасной путь через callback: бот попросит прислать файл сообщением (FR-8).
+    """
+    if config.PAYAPP_URL:
+        return InlineKeyboardMarkup([[
+            InlineKeyboardButton(
+                "📎 Прикрепить платёжку",
+                web_app=WebAppInfo(f"{config.PAYAPP_URL}?req={req_id}"))
+        ]])
     return InlineKeyboardMarkup([[
         InlineKeyboardButton("📎 Прикрепить платёжку", callback_data=f"act:attach:{req_id}")
     ]])

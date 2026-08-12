@@ -262,11 +262,16 @@ async def action_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await core.send_payment_file_to(context.bot, req, uid)
             await query.answer("📄 Платёжка отправлена вам.")
             return
-        if uid in db.get_payment_pending(req_id):
+        already = db.get_payment_pending(req_id)
+        if uid in already:
             await query.answer("⏳ Уже запрошено — ждём бухгалтера.", show_alert=True)
             return
         db.add_payment_pending(req_id, uid)
         await query.answer("✅ Запрос отправлен бухгалтеру.", show_alert=True)
+        # Пинг бухгалтеру — только на ПЕРВЫЙ запрос по заявке (очередь была пуста).
+        # Последующие запросы (в т.ч. от других людей) молча встают в очередь. FR-7/T5.
+        if already:
+            return
         label = _requester_label(uid, req)
         for aid in core.accountant_ids():
             try:
