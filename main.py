@@ -63,10 +63,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"Ваш ID: {user.id}"
         )
         # Директору — единоразовый пинг при первом появлении нового человека.
-        if not existed and config.DIRECTOR_ID and not is_privileged(user.id):
+        did = core.director_id()
+        if not existed and did and not is_privileged(user.id):
             try:
                 await context.bot.send_message(
-                    config.DIRECTOR_ID,
+                    did,
                     f"🆕 {user.full_name} запустил(а) бота и ждёт закрепления за сектором.\n"
                     f"Закрепите командой /assign",
                 )
@@ -87,7 +88,7 @@ async def new_wizard(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(NOT_ALLOWED_MSG)
         return ConversationHandler.END
     sectors = list(config.SECTORS)
-    if update.effective_user.id == config.DIRECTOR_ID:
+    if core.is_director(update.effective_user.id):
         sectors.append(config.ADMIN_SECTOR)   # категория «Административные» — только директору
     keyboard = [[InlineKeyboardButton(s, callback_data=f"sector:{s}")] for s in sectors]
     await update.message.reply_text("Выберите сектор:", reply_markup=InlineKeyboardMarkup(keyboard))
@@ -116,7 +117,7 @@ async def sector_chosen(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     sector = query.data.split(":", 1)[1]
     # «Административные» доступны только директору (на случай подделки callback_data).
-    if sector == config.ADMIN_SECTOR and query.from_user.id != config.DIRECTOR_ID:
+    if sector == config.ADMIN_SECTOR and not core.is_director(query.from_user.id):
         await query.edit_message_text("Эта категория доступна только директору.")
         return ConversationHandler.END
     context.user_data["sector"] = sector
@@ -194,7 +195,7 @@ def _requester_label(uid: int, req) -> str:
     # Кто запросил платёжку — для уведомления бухгалтеру.
     if core.is_driver(uid):
         return "Водитель"
-    if uid == config.DIRECTOR_ID:
+    if core.is_director(uid):
         return "Директор"
     p = db.get_person(uid)
     name = (p["name"] if p else None) or str(uid)
@@ -216,7 +217,7 @@ async def action_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ts = now_dt.strftime("%d.%m %H:%M")
 
     if action in ("approve", "reject"):
-        if uid != config.DIRECTOR_ID:
+        if not core.is_director(uid):
             await query.answer("Подтверждать может только директор.", show_alert=True)
             return
         if req["status"] != "отправлено":
@@ -253,7 +254,7 @@ async def action_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif action == "needpay":
         # Запросить платёжку по заявке. Кнопка у водителя, сотрудника-подателя, директора.
         allowed = (uid == req["submitted_by_id"] or core.is_driver(uid)
-                   or uid == config.DIRECTOR_ID)
+                   or core.is_director(uid))
         if not allowed:
             await query.answer("Недоступно.", show_alert=True)
             return
@@ -439,8 +440,10 @@ STATUS_SHORT = {
 
 
 def is_privileged(user_id: int) -> bool:
-    # Директор — только из .env; бухгалтер — из .env ИЛИ назначен через /assign.
-    return user_id == config.DIRECTOR_ID or core.is_accountant(user_id)
+    # Полный доступ (видят все заявки, /list, /report): админ, директор, бухгалтер.
+    # Директор — из .env ИЛИ назначенный админом; бухгалтер — из .env ИЛИ /assign.
+    return (core.is_admin(user_id) or core.is_director(user_id)
+            or core.is_accountant(user_id))
 
 
 NOT_ALLOWED_MSG = (
@@ -532,9 +535,20 @@ async def list_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ---------- Назначение сотрудников за секторами (только директор) ----------
 
+def _can_assign(user_id: int) -> bool:
+    # Назначать может директор (секторы + Бухгалтер/Водитель/Склад) и админ
+    # (дополнительно роль «Директор»).
+    return core.is_director(user_id) or core.is_admin(user_id)
+
+
+def _assign_roles_for(actor_id: int):
+    # Директор раздаёт ROLES; админ — ещё и роль «Директор» (ADMIN_ROLES).
+    return config.ADMIN_ROLES if core.is_admin(actor_id) else config.ROLES
+
+
 async def assign_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != config.DIRECTOR_ID:
-        await update.message.reply_text("Команда доступна только директору.")
+    if not _can_assign(update.effective_user.id):
+        await update.message.reply_text("Команда доступна только директору или админу.")
         return
     people = db.list_people()
     if not people:
@@ -553,6 +567,7 @@ async def assign_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # Подписи кнопок ролей в /assign (значение в БД — из config.ROLES, без эмодзи).
 ROLE_LABEL = {
+    config.ROLE_DIRECTOR: "👑 Директор",
     config.ROLE_ACCOUNTANT: "💰 Бухгалтер",
     config.ROLE_DRIVER: "🚚 Водитель",
     config.ROLE_WAREHOUSE: "📦 Склад",
@@ -562,17 +577,19 @@ ROLE_LABEL = {
 async def assign_pick_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    if query.from_user.id != config.DIRECTOR_ID:
+    actor = query.from_user.id
+    if not _can_assign(actor):
         return
     uid = int(query.data.split(":", 1)[1])
     p = db.get_person(uid)
     name = (p["name"] if p else None) or str(uid)
+    roles = _assign_roles_for(actor)
     # Кнопки-цели: сначала производственные секторы, затем роли. Индекс в callback —
-    # позиция в общем списке SECTORS + ROLES (см. assign_set).
+    # позиция в общем списке SECTORS + roles (тот же порядок в assign_set).
     sec_btns = [InlineKeyboardButton(s, callback_data=f"asgset:{uid}:{i}")
                 for i, s in enumerate(config.SECTORS)]
     role_btns = [InlineKeyboardButton(ROLE_LABEL[r], callback_data=f"asgset:{uid}:{len(config.SECTORS)+i}")
-                 for i, r in enumerate(config.ROLES)]
+                 for i, r in enumerate(roles)]
     keyboard = [sec_btns[i:i + 2] for i in range(0, len(sec_btns), 2)]
     keyboard += [role_btns[i:i + 2] for i in range(0, len(role_btns), 2)]
     keyboard.append([InlineKeyboardButton("— убрать назначение —", callback_data=f"asgset:{uid}:-1")])
@@ -583,27 +600,36 @@ async def assign_pick_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def assign_set(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    if query.from_user.id != config.DIRECTOR_ID:
+    actor = query.from_user.id
+    if not _can_assign(actor):
         return
     _, uid_s, idx_s = query.data.split(":")
     uid, idx = int(uid_s), int(idx_s)
     p = db.get_person(uid)
     name = (p["name"] if p else None) or str(uid)
-    targets = config.SECTORS + config.ROLES
+    # Набор целей зависит от актора: у админа в конце добавлена роль «Директор».
+    roles = _assign_roles_for(actor)
+    targets = list(config.SECTORS) + roles
     if idx == -1:
         db.clear_person(uid, name)
         await apply_menu(context.bot, uid)
         await query.edit_message_text(f"Готово: у «{name}» назначение снято.")
-    elif targets[idx] in config.ROLES:
-        role = targets[idx]
-        db.set_person_role(uid, role, name)
+        return
+    if idx < 0 or idx >= len(targets):
+        # Индекс вне диапазона (напр. директор нажал устаревшую кнопку «Директор»).
+        await query.edit_message_text("Недоступно.")
+        return
+    target = targets[idx]
+    if target in roles:
+        db.set_person_role(uid, target, name)
         await apply_menu(context.bot, uid)
-        await query.edit_message_text(f"Готово: «{name}» → роль «{role}».")
+        extra = ("\n⚠️ Прежний директор потерял права директора."
+                 if target == config.ROLE_DIRECTOR else "")
+        await query.edit_message_text(f"Готово: «{name}» → роль «{target}».{extra}")
     else:
-        sector = targets[idx]
-        db.set_person_sector(uid, sector, name)
+        db.set_person_sector(uid, target, name)
         await apply_menu(context.bot, uid)
-        await query.edit_message_text(f"Готово: «{name}» → сектор «{sector}».")
+        await query.edit_message_text(f"Готово: «{name}» → сектор «{target}».")
 
 
 async def employees_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):

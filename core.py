@@ -40,6 +40,28 @@ def warehouse_ids():
     return ids if ids else ([config.WAREHOUSE_ID] if config.WAREHOUSE_ID else [])
 
 
+def director_ids():
+    # Директор из БД (роль «Директор») важнее .env. Если роль никому не назначена —
+    # работает DIRECTOR_ID из .env.
+    ids = db.get_users_by_role(config.ROLE_DIRECTOR)
+    return ids if ids else ([config.DIRECTOR_ID] if config.DIRECTOR_ID else [])
+
+
+def director_id() -> int:
+    # Единственный директор — для маршрутизации карточек одобрения. 0 — директора нет.
+    ids = director_ids()
+    return ids[0] if ids else 0
+
+
+def is_director(uid: int) -> bool:
+    return uid in director_ids()
+
+
+def is_admin(uid: int) -> bool:
+    # Супер-админ — только из .env (ADMIN_ID). Назначает всех, включая директора.
+    return bool(config.ADMIN_ID) and uid == config.ADMIN_ID
+
+
 def is_accountant(uid: int) -> bool:
     return uid in accountant_ids()
 
@@ -178,8 +200,9 @@ async def refresh_all_cards(bot, req):
     cap = build_full_caption(req)
     npkb = kb_needpay_or_none(req)
     await _edit_caption(bot, req["submitted_by_id"], req["notify_message_id"], cap, npkb)
-    if config.DIRECTOR_ID:
-        await _edit_caption(bot, config.DIRECTOR_ID, req["director_msg_id"], cap, npkb)
+    did = director_id()
+    if did:
+        await _edit_caption(bot, did, req["director_msg_id"], cap, npkb)
     if req["accountant_msg_id"]:
         await _edit_caption(bot, next(iter(accountant_ids()), None),
                             req["accountant_msg_id"], cap, kb_accountant(req))
@@ -336,7 +359,7 @@ async def publish_request(bot, *, sector: str, supplier: str, amount: float,
             db.set_photo_file_id(request_id, fid)
 
     # Заявка самого директора — сразу одобрена, идёт бухгалтеру (без «одобрить себя»).
-    auto_approve = bool(config.DIRECTOR_ID) and submitter_id == config.DIRECTOR_ID
+    auto_approve = is_director(submitter_id)
 
     if auto_approve:
         db.set_status(request_id, "одобрено", "approved_by", submitter_name, "approved_at", now)
@@ -358,9 +381,10 @@ async def publish_request(bot, *, sector: str, supplier: str, amount: float,
         InlineKeyboardButton("🟢 Одобрить", callback_data=f"act:approve:{request_id}"),
         InlineKeyboardButton("✖ Отклонить", callback_data=f"act:reject:{request_id}"),
     ]])
-    if config.DIRECTOR_ID:
+    did = director_id()
+    if did:
         try:
-            dm, fid = await _send_card(bot, config.DIRECTOR_ID, media(), full_caption,
+            dm, fid = await _send_card(bot, did, media(), full_caption,
                                        is_document, reply_markup=kb)
             remember(fid)
             db.set_director_msg(request_id, dm.message_id)

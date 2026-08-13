@@ -75,7 +75,7 @@ async def handle_mysector(request: web.Request) -> web.Response:
     p = db.get_person(uid)
     sector = p["sector"] if p and p["sector"] else ""
     # Директору форма показывает доп. категорию «Административные».
-    admin_sector = config.ADMIN_SECTOR if uid == config.DIRECTOR_ID else ""
+    admin_sector = config.ADMIN_SECTOR if core.is_director(uid) else ""
     return web.json_response(
         {"sector": sector, "locked": bool(sector), "admin_sector": admin_sector})
 
@@ -126,7 +126,8 @@ async def handle_submit(request: web.Request) -> web.Response:
     db.upsert_person(submitter_id, submitter_name)
     person = db.get_person(submitter_id)
     assigned = person["sector"] if person is not None else None
-    privileged = submitter_id == config.DIRECTOR_ID or core.is_accountant(submitter_id)
+    privileged = (core.is_director(submitter_id) or core.is_accountant(submitter_id)
+                  or core.is_admin(submitter_id))
     if not privileged and not assigned:
         return web.json_response({"ok": False, "error": "not_allowed"}, status=403)
 
@@ -141,7 +142,7 @@ async def handle_submit(request: web.Request) -> web.Response:
     else:
         sector = fields.get("sector", "")
         allowed = list(config.SECTORS)
-        if submitter_id == config.DIRECTOR_ID:
+        if core.is_director(submitter_id):
             allowed.append(config.ADMIN_SECTOR)  # «Административные» — только директору
         if sector not in allowed:
             return web.json_response({"ok": False, "error": "bad_sector"}, status=400)
