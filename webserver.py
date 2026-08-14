@@ -1,9 +1,10 @@
 """
-Внутренний веб-сервер мини-приложения (формы заявки).
+Внутренний веб-сервер мини-приложения (формы потребности).
 
 Отдаёт страницу формы и принимает её отправку. Личность отправителя берём НЕ из
 присланных полей, а из подписанного Телеграмом initData (проверяем HMAC по токену
-бота) — подделать нельзя. Файл счёта приходит в том же запросе (multipart).
+бота) — подделать нельзя. Файл (фото/чертёж) приходит в том же запросе (multipart),
+но теперь необязателен (сотрудник подаёт потребность, а не готовую заявку).
 
 Сервер слушает локально (config.WEB_HOST:WEB_PORT); наружу по HTTPS его отдаёт
 nginx. Запускается в общем событийном цикле рядом с ботом (см. main.py).
@@ -29,11 +30,10 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 FORM_HTML = os.path.join(HERE, "webapp", "form.html")
 PAY_HTML = os.path.join(HERE, "webapp", "pay.html")
 
-MAX_FILE_BYTES = 15 * 1024 * 1024  # 15 МБ — с запасом на фото/PDF счёта
+MAX_FILE_BYTES = 15 * 1024 * 1024
 
 
 def verify_init_data(init_data: str, bot_token: str):
-    """Проверяет подпись Telegram WebApp initData. Возвращает dict полей или None."""
     if not init_data:
         return None
     try:
@@ -52,17 +52,14 @@ def verify_init_data(init_data: str, bot_token: str):
 
 
 async def handle_form(request: web.Request) -> web.Response:
-    # Отдаём саму страницу формы.
     return web.FileResponse(FORM_HTML)
 
 
 async def handle_config(request: web.Request) -> web.Response:
-    # Единый источник правды по секторам — из config.py, чтобы форма не расходилась.
     return web.json_response({"sectors": config.SECTORS})
 
 
 async def handle_mysector(request: web.Request) -> web.Response:
-    # Возвращает закреплённый сектор сотрудника (для авто-подстановки в форме).
     data = await request.post()
     init = verify_init_data(data.get("initData", ""), config.BOT_TOKEN)
     if init is None:
@@ -74,7 +71,6 @@ async def handle_mysector(request: web.Request) -> web.Response:
         return web.json_response({"sector": "", "locked": False})
     p = db.get_person(uid)
     sector = p["sector"] if p and p["sector"] else ""
-    # Директору форма показывает доп. категорию «Административные».
     admin_sector = config.ADMIN_SECTOR if core.is_director(uid) else ""
     return web.json_response(
         {"sector": sector, "locked": bool(sector), "admin_sector": admin_sector})
@@ -94,7 +90,7 @@ async def handle_submit(request: web.Request) -> web.Response:
 
     async for part in reader:
         if part.name == "file":
-            file_name = part.filename or "invoice"
+            file_name = part.filename or "attachment"
             file_ctype = (part.headers.get("Content-Type") or "").lower()
             buf = bytearray()
             while True:
@@ -109,7 +105,7 @@ async def handle_submit(request: web.Request) -> web.Response:
         else:
             fields[part.name] = (await part.text()).strip()
 
-    # 1) Проверяем подпись — кто отправил
+    # 1) Проверяем подпись
     init = verify_init_data(fields.get("initData", ""), config.BOT_TOKEN)
     if init is None:
         return web.json_response({"ok": False, "error": "auth_failed"}, status=403)
@@ -122,7 +118,7 @@ async def handle_submit(request: web.Request) -> web.Response:
     except (ValueError, KeyError):
         return web.json_response({"ok": False, "error": "no_user"}, status=403)
 
-    # 2) Регистрируем сотрудника и проверяем право подачи (белый список).
+    # 2) Белый список
     db.upsert_person(submitter_id, submitter_name)
     person = db.get_person(submitter_id)
     assigned = person["sector"] if person is not None else None
@@ -131,62 +127,107 @@ async def handle_submit(request: web.Request) -> web.Response:
     if not privileged and not assigned:
         return web.json_response({"ok": False, "error": "not_allowed"}, status=403)
 
-    supplier = fields.get("supplier", "")
-    naryad = fields.get("naryad", "")
-    amount_raw = fields.get("amount", "").replace(" ", "").replace(",", ".")
+    # 3) Поля потребности
+    description = fields.get("description", "")
+    needed_by = fields.get("needed_by", "")
+    urgency = fields.get("urgency", "обычная")
 
-    # Закреплён за сектором — сектор берём из привязки (только свой сектор),
-    # незакреплённый — из формы (свободный выбор).
     if assigned:
         sector = assigned
     else:
         sector = fields.get("sector", "")
-        allowed = list(config.SECTORS)
-        if core.is_director(submitter_id):
-            allowed.append(config.ADMIN_SECTOR)  # «Административные» — только директору
-        if sector not in allowed:
+        if sector not in config.SECTORS:
             return web.json_response({"ok": False, "error": "bad_sector"}, status=400)
-    if not supplier or not naryad:
-        return web.json_response({"ok": False, "error": "empty_fields"}, status=400)
-    try:
-        amount = float(amount_raw)
-        if amount <= 0:
-            raise ValueError
-    except ValueError:
-        return web.json_response({"ok": False, "error": "bad_amount"}, status=400)
-    if not file_bytes:
-        return web.json_response({"ok": False, "error": "no_file"}, status=400)
 
-    is_document = "pdf" in file_ctype or (file_name or "").lower().endswith(".pdf")
+    if not description:
+        return web.json_response({"ok": False, "error": "no_description"}, status=400)
+    if not needed_by:
+        return web.json_response({"ok": False, "error": "bad_date"}, status=400)
 
-    # 3) Публикуем заявку
+    # 4) Фото (необязательно) — если есть, отправляем через Telegram для получения file_id
+    photo_file_id = None
+    is_document = False
+    if file_bytes:
+        is_document = "pdf" in (file_ctype or "") or (file_name or "").lower().endswith(".pdf")
+        media = InputFile(BytesIO(file_bytes), filename=file_name or "attachment")
+        try:
+            # Отправляем файл боту (самому себе) чтобы получить file_id,
+            # или передаём байты напрямую в publish_need (он отправит закупщику).
+            pass
+        except Exception:
+            pass
+
+    # 5) Публикуем потребность
     try:
-        request_no = await core.publish_request(
-            bot,
-            sector=sector, supplier=supplier, amount=amount, naryad=naryad,
-            submitter_id=submitter_id, submitter_name=submitter_name,
-            file_bytes=file_bytes, file_name=file_name, is_document=is_document,
-        )
+        if file_bytes:
+            from io import BytesIO as _BytesIO
+            request_no = await _publish_need_with_bytes(
+                bot, sector=sector, description=description, needed_by=needed_by,
+                urgency=urgency, submitter_id=submitter_id, submitter_name=submitter_name,
+                file_bytes=file_bytes, file_name=file_name, is_document=is_document,
+            )
+        else:
+            request_no = await core.publish_need(
+                bot, sector=sector, description=description, needed_by=needed_by,
+                urgency=urgency, submitter_id=submitter_id, submitter_name=submitter_name,
+            )
     except Exception as e:
-        log.exception("Не удалось опубликовать заявку из формы: %s", e)
+        log.exception("Не удалось опубликовать потребность из формы: %s", e)
         return web.json_response({"ok": False, "error": "publish_failed"}, status=500)
 
-    # Отдельное подтверждение не шлём: publish_request уже отправил сотруднику
-    # личную карточку заявки — она и есть подтверждение (меньше шума).
     return web.json_response({"ok": True, "request_no": request_no})
 
 
+async def _publish_need_with_bytes(bot, *, sector, description, needed_by, urgency,
+                                    submitter_id, submitter_name,
+                                    file_bytes, file_name, is_document):
+    """Публикует потребность с файлом из веб-формы (байты → file_id через отправку)."""
+    prefix = config.SECTOR_PREFIX[sector]
+    from datetime import datetime
+    request_no = db.next_request_no(sector, prefix)
+    now = datetime.now(config.TZ).isoformat(timespec="seconds")
+
+    request_id = db.create_need(
+        request_no=request_no, sector=sector,
+        submitted_by_id=submitter_id, submitted_by_name=submitter_name,
+        submitted_at=now, description=description,
+        needed_by=needed_by, urgency=urgency,
+    )
+
+    req = db.get_by_id(request_id)
+    text = core.build_need_text(req)
+    media = InputFile(BytesIO(file_bytes), filename=file_name or "attachment")
+
+    # Отправляем закупщику с файлом
+    bids = core.buyer_ids()
+    stored_fid = None
+    for bid in bids:
+        try:
+            m, fid = await core._send_card(bot, bid, media, text,
+                                           is_document, reply_markup=core.kb_buyer(req))
+            if fid and not stored_fid:
+                stored_fid = fid
+                db.set_need_photo(request_id, fid, 1 if is_document else 0)
+            db.set_buyer_msg(request_id, m.message_id)
+            media = stored_fid or InputFile(BytesIO(file_bytes), filename=file_name or "attachment")
+        except Exception as e:
+            log.warning("Не удалось отправить потребность закупщику %s: %s", bid, e)
+
+    # Сотруднику — текстовый монитор
+    try:
+        m = await bot.send_message(submitter_id, text)
+        db.attach_notify_message(request_id, m.message_id)
+    except Exception:
+        pass
+
+    return request_no
+
+
 async def handle_pay(request: web.Request) -> web.Response:
-    # Отдаём окно загрузки платёжки (pay.html). Открывается кнопкой у бухгалтера.
     return web.FileResponse(PAY_HTML)
 
 
 async def handle_attach_payment(request: web.Request) -> web.Response:
-    """Приём платёжки из окна загрузки: подпись → бухгалтер → цепляем к заявке → рассылка.
-
-    Логика повторяет старый путь (accountant_payment_received в main.py), но файл
-    приходит из Web App, а не отдельным сообщением. FR-3..FR-6.
-    """
     bot = request.app["bot"]
     try:
         reader = await request.multipart()
@@ -215,7 +256,6 @@ async def handle_attach_payment(request: web.Request) -> web.Response:
         else:
             fields[part.name] = (await part.text()).strip()
 
-    # 1) Подпись — кто отправил (FR-3).
     init = verify_init_data(fields.get("initData", ""), config.BOT_TOKEN)
     if init is None:
         return web.json_response({"ok": False, "error": "auth_failed"}, status=403)
@@ -225,11 +265,9 @@ async def handle_attach_payment(request: web.Request) -> web.Response:
     except (ValueError, KeyError):
         return web.json_response({"ok": False, "error": "no_user"}, status=403)
 
-    # 2) Прикреплять может только бухгалтер (FR-3).
     if not core.is_accountant(uid):
         return web.json_response({"ok": False, "error": "not_allowed"}, status=403)
 
-    # 3) Заявка (req из ?req=<id>, не подписан — но проверяем существование).
     try:
         req_id = int(fields.get("req", ""))
     except ValueError:
@@ -242,8 +280,6 @@ async def handle_attach_payment(request: web.Request) -> web.Response:
 
     is_document = "pdf" in file_ctype or (file_name or "").lower().endswith(".pdf")
 
-    # 4) Отправляем файл бухгалтеру — это и подтверждение (FR-6), и способ получить
-    #    постоянный file_id для пересылки запросившим.
     try:
         caption = f"✅ Платёжка по наряду {req['naryad']} прикреплена."
         media = InputFile(BytesIO(file_bytes), filename=file_name or "payment")
@@ -252,7 +288,6 @@ async def handle_attach_payment(request: web.Request) -> web.Response:
         log.exception("attach_payment: не удалось отправить платёжку бухгалтеру: %s", e)
         return web.json_response({"ok": False, "error": "publish_failed"}, status=500)
 
-    # 5) Сохраняем file_id и рассылаем всем из очереди, очередь очищается (FR-5).
     db.set_payment_file(req_id, file_id, 1 if is_document else 0)
     req = db.get_by_id(req_id)
     await core.deliver_payment_to_pending(bot, req)
@@ -272,7 +307,6 @@ def build_web_app(bot) -> web.Application:
 
 
 async def start_webserver(bot):
-    """Поднимает веб-сервер, возвращает AppRunner (для последующего cleanup)."""
     app = build_web_app(bot)
     runner = web.AppRunner(app)
     await runner.setup()

@@ -85,6 +85,27 @@ def init_db():
         # прикрепляется — рассылается всем из списка, список очищается.
         if "payment_pending_for" not in cols:
             conn.execute("ALTER TABLE requests ADD COLUMN payment_pending_for TEXT")
+        if "admin_msg_id" not in cols:
+            conn.execute("ALTER TABLE requests ADD COLUMN admin_msg_id INTEGER")
+        if "description" not in cols:
+            conn.execute("ALTER TABLE requests ADD COLUMN description TEXT")
+        if "needed_by" not in cols:
+            conn.execute("ALTER TABLE requests ADD COLUMN needed_by TEXT")
+        if "urgency" not in cols:
+            conn.execute("ALTER TABLE requests ADD COLUMN urgency TEXT")
+        if "buyer_msg_id" not in cols:
+            conn.execute("ALTER TABLE requests ADD COLUMN buyer_msg_id INTEGER")
+        if "processed_by" not in cols:
+            conn.execute("ALTER TABLE requests ADD COLUMN processed_by TEXT")
+        if "processed_at" not in cols:
+            conn.execute("ALTER TABLE requests ADD COLUMN processed_at TEXT")
+        if "accountant2_msg_id" not in cols:
+            conn.execute("ALTER TABLE requests ADD COLUMN accountant2_msg_id INTEGER")
+        if "need_photo_file_id" not in cols:
+            conn.execute("ALTER TABLE requests ADD COLUMN need_photo_file_id TEXT")
+        if "need_is_document" not in cols:
+            conn.execute("ALTER TABLE requests ADD COLUMN need_is_document INTEGER DEFAULT 0")
+        conn.execute("UPDATE requests SET status = 'оформлено' WHERE status = 'отправлено'")
         conn.commit()
 
 
@@ -177,11 +198,45 @@ def create_request(**kwargs) -> int:
                (request_no, sector, supplier, amount, naryad, photo_file_id,
                 submitted_by_id, submitted_by_name, submitted_at, status, is_document)
                VALUES (:request_no, :sector, :supplier, :amount, :naryad, :photo_file_id,
-                       :submitted_by_id, :submitted_by_name, :submitted_at, 'отправлено', :is_document)""",
+                       :submitted_by_id, :submitted_by_name, :submitted_at, 'оформлено', :is_document)""",
             kwargs,
         )
         conn.commit()
         return cur.lastrowid
+
+
+def create_need(**kwargs) -> int:
+    kwargs.setdefault("need_photo_file_id", None)
+    kwargs.setdefault("need_is_document", 0)
+    with closing(sqlite3.connect(DB_PATH)) as conn:
+        cur = conn.execute(
+            """INSERT INTO requests
+               (request_no, sector, supplier, amount, naryad,
+                submitted_by_id, submitted_by_name, submitted_at, status,
+                description, needed_by, urgency, need_photo_file_id, need_is_document)
+               VALUES (:request_no, :sector, '', 0, '',
+                       :submitted_by_id, :submitted_by_name, :submitted_at, 'потребность',
+                       :description, :needed_by, :urgency, :need_photo_file_id, :need_is_document)""",
+            kwargs,
+        )
+        conn.commit()
+        return cur.lastrowid
+
+
+def update_need_to_request(request_id: int, *, supplier: str, amount: float,
+                           naryad: str, photo_file_id: str, is_document: int,
+                           processed_by: str, processed_at: str):
+    with closing(sqlite3.connect(DB_PATH)) as conn:
+        conn.execute(
+            """UPDATE requests
+               SET supplier = ?, amount = ?, naryad = ?, photo_file_id = ?,
+                   is_document = ?, processed_by = ?, processed_at = ?,
+                   status = 'оформлено'
+               WHERE id = ?""",
+            (supplier, amount, naryad, photo_file_id, is_document,
+             processed_by, processed_at, request_id),
+        )
+        conn.commit()
 
 
 def set_photo_file_id(request_id: int, file_id: str):
@@ -232,6 +287,35 @@ def set_warehouse_msg(request_id: int, message_id: int):
     with closing(sqlite3.connect(DB_PATH)) as conn:
         conn.execute(
             "UPDATE requests SET warehouse_msg_id = ? WHERE id = ?", (message_id, request_id))
+        conn.commit()
+
+
+def set_admin_msg(request_id: int, message_id: int):
+    with closing(sqlite3.connect(DB_PATH)) as conn:
+        conn.execute(
+            "UPDATE requests SET admin_msg_id = ? WHERE id = ?", (message_id, request_id))
+        conn.commit()
+
+
+def set_buyer_msg(request_id: int, message_id: int):
+    with closing(sqlite3.connect(DB_PATH)) as conn:
+        conn.execute(
+            "UPDATE requests SET buyer_msg_id = ? WHERE id = ?", (message_id, request_id))
+        conn.commit()
+
+
+def set_accountant2_msg(request_id: int, message_id: int):
+    with closing(sqlite3.connect(DB_PATH)) as conn:
+        conn.execute(
+            "UPDATE requests SET accountant2_msg_id = ? WHERE id = ?", (message_id, request_id))
+        conn.commit()
+
+
+def set_need_photo(request_id: int, file_id: str, is_document: int):
+    with closing(sqlite3.connect(DB_PATH)) as conn:
+        conn.execute(
+            "UPDATE requests SET need_photo_file_id = ?, need_is_document = ? WHERE id = ?",
+            (file_id, is_document, request_id))
         conn.commit()
 
 

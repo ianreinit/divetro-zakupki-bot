@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
-<title>Новая заявка</title>
+<title>Новая потребность</title>
 <script src="https://telegram.org/js/telegram-web-app.js"></script>
 <style>
   :root {
@@ -25,16 +25,28 @@
   }
   h1 { font-size: 20px; margin: 4px 0 16px; }
   label { display: block; font-size: 13px; color: var(--hint); margin: 14px 0 6px; }
-  input, select {
+  input, select, textarea {
     width: 100%; padding: 12px 14px; font-size: 16px;
     color: var(--text); background: var(--field-bg);
     border: 1px solid var(--border); border-radius: 12px; outline: none;
     appearance: none; -webkit-appearance: none;
+    font-family: inherit;
   }
-  input:focus, select:focus { border-color: var(--accent); }
+  textarea { resize: none; min-height: 80px; line-height: 1.4; }
+  input:focus, select:focus, textarea:focus { border-color: var(--accent); }
   select {
     background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 24 24' fill='none' stroke='%238e8e93' stroke-width='2.5'><path d='M6 9l6 6 6-6'/></svg>");
     background-repeat: no-repeat; background-position: right 14px center; padding-right: 40px;
+  }
+  .urgency-row { display: flex; gap: 8px; margin-top: 6px; }
+  .urgency-btn {
+    flex: 1; padding: 10px 8px; text-align: center; font-size: 14px; font-weight: 500;
+    border: 1px solid var(--border); border-radius: 12px;
+    background: var(--field-bg); color: var(--text); cursor: pointer;
+    transition: border-color .15s, background .15s;
+  }
+  .urgency-btn.selected {
+    border-color: var(--accent); background: rgba(46,166,255,.1); color: var(--accent);
   }
   .file-btn {
     display: flex; align-items: center; gap: 10px;
@@ -60,32 +72,36 @@
 </style>
 </head>
 <body>
-  <h1>Новая заявка на закупку</h1>
+  <h1>Новая потребность</h1>
 
   <label for="sector">Сектор</label>
   <select id="sector"></select>
 
-  <label for="supplier">Поставщик</label>
-  <input id="supplier" type="text" placeholder="Например: ООО Краски" autocomplete="off">
+  <label for="description">Что нужно</label>
+  <textarea id="description" placeholder="Например: Метизы М10, 200 шт, оцинкованные" rows="3"></textarea>
 
-  <label for="amount">Сумма</label>
-  <input id="amount" type="text" inputmode="decimal" placeholder="Например: 42500" autocomplete="off">
+  <label for="needed_by">Нужно к дате</label>
+  <input id="needed_by" type="date">
 
-  <label for="naryad">Номер наряда / проекта</label>
-  <input id="naryad" type="text" placeholder="Например: 281-26" autocomplete="off">
+  <label>Срочность</label>
+  <div class="urgency-row">
+    <div class="urgency-btn selected" data-val="обычная">Обычная</div>
+    <div class="urgency-btn" data-val="скоро">&#9889; Скоро</div>
+    <div class="urgency-btn" data-val="срочно">&#128308; Срочно</div>
+  </div>
 
-  <label>Счёт (фото или PDF)</label>
+  <label>Фото / файл (необязательно)</label>
   <label class="file-btn" id="fileBtn" for="file">
     <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M17 8l-5-5-5 5M12 3v12"/></svg>
-    <span id="fileLabel">Прикрепить файл счёта</span>
+    <span id="fileLabel">Прикрепить фото или чертёж</span>
   </label>
   <input id="file" type="file" accept="image/*,application/pdf">
   <img id="preview" alt="">
-  <div class="hint-line">Без счёта заявку отправить нельзя.</div>
+  <div class="hint-line">Фото, чертёж, образец — поможет закупщику найти нужное.</div>
 
   <div id="error"></div>
 
-  <button id="submit">Отправить заявку</button>
+  <button id="submit">Отправить потребность</button>
 
 <script>
   const tg = window.Telegram ? window.Telegram.WebApp : null;
@@ -94,12 +110,25 @@
   const $ = (id) => document.getElementById(id);
   const errorBox = $("error");
   const submitBtn = $("submit");
+  let selectedUrgency = "обычная";
 
   function showError(msg) { errorBox.textContent = msg; errorBox.style.display = "block"; }
   function clearError() { errorBox.style.display = "none"; }
 
-  // Заполняем список секторов из бэкенда (единый источник — config.py),
-  // затем подставляем закреплённый сектор сотрудника, если он есть.
+  // Срочность — кнопки
+  document.querySelectorAll(".urgency-btn").forEach(btn => {
+    btn.addEventListener("click", () => {
+      document.querySelectorAll(".urgency-btn").forEach(b => b.classList.remove("selected"));
+      btn.classList.add("selected");
+      selectedUrgency = btn.dataset.val;
+    });
+  });
+
+  // Дата по умолчанию — через неделю
+  const d = new Date(); d.setDate(d.getDate() + 7);
+  $("needed_by").value = d.toISOString().split("T")[0];
+
+  // Секторы из бэкенда
   fetch("config").then(r => r.json()).then(cfg => {
     const sel = $("sector");
     (cfg.sectors || []).forEach(s => {
@@ -117,16 +146,10 @@
       .then(info => {
         if (!info) return;
         const sel = $("sector");
-        // Директору добавляем категорию «Административные» (аренда и т.п.).
-        if (info.admin_sector) {
-          const opt = document.createElement("option");
-          opt.value = info.admin_sector; opt.textContent = info.admin_sector;
-          sel.appendChild(opt);
-        }
         if (!info.sector) return;
         sel.value = info.sector;
         if (info.locked) {
-          sel.disabled = true;   // значение всё равно отправляется (берём из .value)
+          sel.disabled = true;
           const note = document.createElement("div");
           note.className = "hint-line";
           note.textContent = "Ваш сектор: " + info.sector + " (закреплён)";
@@ -136,11 +159,11 @@
       .catch(() => {});
   }
 
-  // Превью выбранного файла
+  // Превью файла
   $("file").addEventListener("change", (e) => {
     const f = e.target.files[0];
     const btn = $("fileBtn"), label = $("fileLabel"), prev = $("preview");
-    if (!f) { label.textContent = "Прикрепить файл счёта"; btn.classList.remove("filled"); prev.style.display = "none"; return; }
+    if (!f) { label.textContent = "Прикрепить фото или чертёж"; btn.classList.remove("filled"); prev.style.display = "none"; return; }
     label.textContent = f.name;
     btn.classList.add("filled");
     if (f.type.startsWith("image/")) {
@@ -152,24 +175,20 @@
 
   submitBtn.addEventListener("click", async () => {
     clearError();
-    const sector = $("sector").value;
-    const supplier = $("supplier").value.trim();
-    const amount = $("amount").value.trim();
-    const naryad = $("naryad").value.trim();
-    const file = $("file").files[0];
+    const description = $("description").value.trim();
+    const needed_by = $("needed_by").value;
 
-    if (!supplier) return showError("Укажите поставщика.");
-    if (!amount) return showError("Укажите сумму.");
-    if (!naryad) return showError("Укажите номер наряда.");
-    if (!file) return showError("Прикрепите фото или PDF счёта.");
+    if (!description) return showError("Опишите, что вам нужно.");
+    if (!needed_by) return showError("Укажите дату.");
 
     const fd = new FormData();
     fd.append("initData", tg ? tg.initData : "");
-    fd.append("sector", sector);
-    fd.append("supplier", supplier);
-    fd.append("amount", amount);
-    fd.append("naryad", naryad);
-    fd.append("file", file);
+    fd.append("sector", $("sector").value);
+    fd.append("description", description);
+    fd.append("needed_by", needed_by);
+    fd.append("urgency", selectedUrgency);
+    const file = $("file").files[0];
+    if (file) fd.append("file", file);
 
     submitBtn.disabled = true;
     submitBtn.textContent = "Отправляю…";
@@ -178,28 +197,28 @@
       const data = await resp.json();
       if (data.ok) {
         if (tg) { tg.HapticFeedback && tg.HapticFeedback.notificationOccurred("success"); tg.close(); }
-        else { document.body.innerHTML = "<h1>Заявка " + data.request_no + " отправлена.</h1>"; }
+        else { document.body.innerHTML = "<h1>Потребность " + data.request_no + " отправлена закупщику.</h1>"; }
       } else {
         showError(errorText(data.error));
-        submitBtn.disabled = false; submitBtn.textContent = "Отправить заявку";
+        submitBtn.disabled = false; submitBtn.textContent = "Отправить потребность";
       }
     } catch (e) {
       showError("Сеть недоступна, попробуйте ещё раз.");
-      submitBtn.disabled = false; submitBtn.textContent = "Отправить заявку";
+      submitBtn.disabled = false; submitBtn.textContent = "Отправить потребность";
     }
   });
 
   function errorText(code) {
     const map = {
-      auth_failed: "Не удалось подтвердить, что заявку отправляете вы. Откройте форму через кнопку в боте.",
+      auth_failed: "Не удалось подтвердить, что потребность отправляете вы. Откройте форму через кнопку в боте.",
       no_user: "Не удалось определить отправителя. Откройте форму через кнопку в боте.",
       not_allowed: "Вы не закреплены за сектором. Обратитесь к директору, чтобы он вас добавил.",
       bad_sector: "Выберите сектор из списка.",
-      empty_fields: "Заполните поставщика и наряд.",
-      bad_amount: "Сумма должна быть числом больше нуля.",
-      no_file: "Прикрепите фото или PDF счёта.",
+      empty_fields: "Опишите, что вам нужно.",
+      no_description: "Опишите, что вам нужно.",
+      bad_date: "Укажите дату.",
       file_too_big: "Файл слишком большой (максимум 15 МБ).",
-      publish_failed: "Не получилось опубликовать заявку. Попробуйте ещё раз.",
+      publish_failed: "Не получилось отправить потребность. Попробуйте ещё раз.",
     };
     return map[code] || "Что-то пошло не так. Попробуйте ещё раз.";
   }

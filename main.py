@@ -23,10 +23,15 @@ import webserver
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("zakupki-bot")
 
-SECTOR, SUPPLIER, AMOUNT, NARYAD, PHOTO = range(5)
+# Состояния мастера сотрудника (потребность)
+SECTOR, DESCRIPTION, NEEDED_BY, URGENCY, NEED_PHOTO = range(5)
+# Состояния мастера сотрудника (админ-заявка директора — полный набор полей)
+ADM_SUPPLIER, ADM_AMOUNT, ADM_NARYAD, ADM_PHOTO = range(5, 9)
+# Состояния мастера закупщика (оформление потребности в заявку)
+B_SUPPLIER, B_AMOUNT, B_NARYAD, B_PHOTO = range(4)
 
 
-# ---------- Мастер подачи заявки (личка сотрудника с ботом) ----------
+# ---------- /start ----------
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
@@ -37,35 +42,31 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     role = person["role"] if person else None
     if is_privileged(user.id) or (person is not None and person["sector"]):
-        # Закреплён за сектором / привилегирован — сразу к делу.
         sector_line = f"Ваш сектор: {person['sector']}\n" if (person and person["sector"]) else ""
         kb = None
         if config.WEBAPP_URL and may_submit(user.id):
             kb = InlineKeyboardMarkup([[InlineKeyboardButton(
-                "📝 Заполнить заявку", web_app=WebAppInfo(config.WEBAPP_URL))]])
+                "📋 Подать потребность", web_app=WebAppInfo(config.WEBAPP_URL))]])
         await update.message.reply_text(
             f"Привет, {user.first_name}! Я бот закупок.\n{sector_line}\n"
-            "📝 /new — подать заявку\n"
+            "📋 /new — подать потребность\n"
             "📋 /list — заявки\n"
             "📋 /my — мои заявки",
             reply_markup=kb,
         )
     elif role:
-        # Водитель / склад — работают только по кнопкам на приходящих карточках.
         await update.message.reply_text(
             f"Привет, {user.first_name}! Вы в системе как «{role}».\n\n"
             "Задачи будут приходить карточками — нажимайте кнопки прямо на них.\n\n"
             f"Ваш ID: {user.id}"
         )
     else:
-        # Новый / незакреплённый — ждёт директора.
         await update.message.reply_text(
             f"Привет, {user.first_name}! Вы зарегистрированы в боте закупок.\n\n"
             "Осталось, чтобы директор закрепил вас за сектором — после этого "
-            "сможете подавать заявки. Обычно это быстро.\n\n"
+            "сможете подавать потребности. Обычно это быстро.\n\n"
             f"Ваш ID: {user.id}"
         )
-        # Директору — единоразовый пинг при первом появлении нового человека.
         did = core.director_id()
         if not existed and did and not is_privileged(user.id):
             try:
@@ -79,38 +80,36 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def whoami(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Показать свой Telegram ID — для настройки DIRECTOR_ID / ACCOUNTANT_ID.
     u = update.effective_user
     await update.message.reply_text(f"Ваш Telegram ID: {u.id}\nИмя: {u.full_name}")
 
 
+# ---------- Мастер подачи потребности (сотрудник) ----------
+
 async def new_wizard(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Пошаговый мастер (запасной путь / команда /new_text).
     db.upsert_person(update.effective_user.id, update.effective_user.full_name)
     if not may_submit(update.effective_user.id):
         await update.message.reply_text(NOT_ALLOWED_MSG)
         return ConversationHandler.END
     sectors = list(config.SECTORS)
     if core.is_director(update.effective_user.id):
-        sectors.append(config.ADMIN_SECTOR)   # категория «Административные» — только директору
+        sectors.append(config.ADMIN_SECTOR)
     keyboard = [[InlineKeyboardButton(s, callback_data=f"sector:{s}")] for s in sectors]
     await update.message.reply_text("Выберите сектор:", reply_markup=InlineKeyboardMarkup(keyboard))
     return SECTOR
 
 
 async def new_request(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # /new: если настроена форма (WEBAPP_URL) — показываем кнопку с формой, без диалога.
-    # Иначе откатываемся на пошаговый мастер.
     db.upsert_person(update.effective_user.id, update.effective_user.full_name)
     if not may_submit(update.effective_user.id):
         await update.message.reply_text(NOT_ALLOWED_MSG)
         return ConversationHandler.END
     if config.WEBAPP_URL:
         kb = InlineKeyboardMarkup([[
-            InlineKeyboardButton("📝 Заполнить заявку", web_app=WebAppInfo(config.WEBAPP_URL))
+            InlineKeyboardButton("📋 Подать потребность", web_app=WebAppInfo(config.WEBAPP_URL))
         ]])
         await update.message.reply_text(
-            "Нажмите кнопку, чтобы заполнить заявку одной формой:", reply_markup=kb)
+            "Нажмите кнопку, чтобы заполнить потребность:", reply_markup=kb)
         return ConversationHandler.END
     return await new_wizard(update, context)
 
@@ -119,53 +118,153 @@ async def sector_chosen(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     sector = query.data.split(":", 1)[1]
-    # «Административные» доступны только директору (на случай подделки callback_data).
     if sector == config.ADMIN_SECTOR and not core.is_director(query.from_user.id):
         await query.edit_message_text("Эта категория доступна только директору.")
         return ConversationHandler.END
     context.user_data["sector"] = sector
-    await query.edit_message_text(f"Сектор: {sector}\n\nПоставщик?")
-    return SUPPLIER
+
+    # Административные — полная заявка (директор знает поставщика и сумму).
+    if sector == config.ADMIN_SECTOR:
+        await query.edit_message_text(f"Сектор: {sector}\n\nПоставщик?")
+        return ADM_SUPPLIER
+
+    # Обычная потребность — упрощённый путь.
+    await query.edit_message_text(f"Сектор: {sector}\n\nЧто нужно? (опишите)")
+    return DESCRIPTION
 
 
-async def supplier_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# --- Упрощённый путь: потребность ---
+
+async def description_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data["description"] = update.message.text.strip()
+    await update.message.reply_text(
+        "К какой дате нужно? (ДД.ММ, например 25.08)")
+    return NEEDED_BY
+
+
+async def needed_by_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    raw = update.message.text.strip()
+    # Разбираем ДД.ММ или ДД.ММ.ГГГГ
+    try:
+        parts = raw.split(".")
+        day = int(parts[0])
+        month = int(parts[1])
+        year = int(parts[2]) if len(parts) > 2 else datetime.now(config.TZ).year
+        if year < 100:
+            year += 2000
+        dt = datetime(year, month, day)
+        context.user_data["needed_by"] = dt.strftime("%Y-%m-%d")
+    except (ValueError, IndexError):
+        await update.message.reply_text("Не понял дату. Введите в формате ДД.ММ, например 25.08")
+        return NEEDED_BY
+
+    kb = InlineKeyboardMarkup([[
+        InlineKeyboardButton("Обычная", callback_data="urgency:обычная"),
+        InlineKeyboardButton("⚡ Скоро", callback_data="urgency:скоро"),
+        InlineKeyboardButton("🔴 Срочно", callback_data="urgency:срочно"),
+    ]])
+    await update.message.reply_text("Срочность:", reply_markup=kb)
+    return URGENCY
+
+
+async def urgency_chosen(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    context.user_data["urgency"] = query.data.split(":", 1)[1]
+    kb = InlineKeyboardMarkup([[
+        InlineKeyboardButton("Пропустить", callback_data="skipphoto")
+    ]])
+    await query.edit_message_text(
+        "Прикрепите фото или файл (необязательно) — или нажмите «Пропустить».",
+        reply_markup=kb)
+    return NEED_PHOTO
+
+
+async def need_photo_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.message.photo:
+        file_id = update.message.photo[-1].file_id
+        is_doc = False
+    elif update.message.document:
+        file_id = update.message.document.file_id
+        is_doc = (update.message.document.mime_type or "") != "" and \
+            not (update.message.document.mime_type or "").startswith("image/")
+    else:
+        await update.message.reply_text("Это не похоже на фото или файл. Прикрепите или нажмите «Пропустить».")
+        return NEED_PHOTO
+
+    data = context.user_data
+    await core.publish_need(
+        context.bot,
+        sector=data["sector"],
+        description=data["description"],
+        needed_by=data["needed_by"],
+        urgency=data["urgency"],
+        submitter_id=update.effective_user.id,
+        submitter_name=update.effective_user.full_name,
+        photo_file_id=file_id,
+        is_document=is_doc,
+    )
+    context.user_data.clear()
+    return ConversationHandler.END
+
+
+async def need_skip_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    data = context.user_data
+    await core.publish_need(
+        context.bot,
+        sector=data["sector"],
+        description=data["description"],
+        needed_by=data["needed_by"],
+        urgency=data["urgency"],
+        submitter_id=query.from_user.id,
+        submitter_name=query.from_user.full_name,
+    )
+    await query.edit_message_text("Потребность отправлена закупщику.")
+    context.user_data.clear()
+    return ConversationHandler.END
+
+
+# --- Админ-путь (директор, полная заявка) ---
+
+async def adm_supplier_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["supplier"] = update.message.text.strip()
     await update.message.reply_text("Сумма?")
-    return AMOUNT
+    return ADM_AMOUNT
 
 
-async def amount_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def adm_amount_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip().replace(" ", "").replace(",", ".")
     try:
         amount = float(text)
     except ValueError:
         await update.message.reply_text("Не понял сумму, введите числом, например 42500")
-        return AMOUNT
+        return ADM_AMOUNT
     context.user_data["amount"] = amount
     await update.message.reply_text("Номер наряда / проекта?")
-    return NARYAD
+    return ADM_NARYAD
 
 
-async def naryad_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def adm_naryad_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["naryad"] = update.message.text.strip()
     await update.message.reply_text(
         "Прикрепите фото или PDF счёта — без него заявку отправить нельзя."
     )
-    return PHOTO
+    return ADM_PHOTO
 
 
-async def photo_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def adm_photo_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message.photo:
         file_id = update.message.photo[-1].file_id
         is_document = False
     elif update.message.document:
         file_id = update.message.document.file_id
-        # PDF (и прочие не-картинки) отправляем как документ, а не как фото.
         is_document = (update.message.document.mime_type or "") != "" and \
             not (update.message.document.mime_type or "").startswith("image/")
     else:
         await update.message.reply_text("Это не похоже на фото или файл. Прикрепите счёт.")
-        return PHOTO
+        return ADM_PHOTO
 
     data = context.user_data
     await core.publish_request(
@@ -179,9 +278,6 @@ async def photo_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
         photo_file_id=file_id,
         is_document=is_document,
     )
-
-    # Отдельное «Готово» не шлём — личная карточка заявки (её отправляет
-    # publish_request) сама служит подтверждением. Меньше шума.
     context.user_data.clear()
     return ConversationHandler.END
 
@@ -192,10 +288,105 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 
-# ---------- Кнопки: одобрение директора / оплата / логистика / платёжка ----------
+# ---------- Мастер закупщика (оформление потребности → заявка) ----------
+
+async def buyer_start_process(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    _, action, req_id_s = query.data.split(":")
+    req_id = int(req_id_s)
+    req = db.get_by_id(req_id)
+
+    if req is None:
+        await query.answer("Заявка не найдена.", show_alert=True)
+        return ConversationHandler.END
+    if not core.is_buyer(query.from_user.id):
+        await query.answer("Оформить может только закупщик.", show_alert=True)
+        return ConversationHandler.END
+    if req["status"] != "потребность":
+        await query.answer("Потребность уже обработана.", show_alert=True)
+        return ConversationHandler.END
+
+    await query.answer()
+    context.user_data["buyer_req_id"] = req_id
+    context.user_data["buyer_data"] = {}
+
+    desc = req.get("description") or "—"
+    await query.edit_message_text(
+        f"Оформление потребности {req['request_no']}\n"
+        f"Что нужно: {desc}\n\n"
+        f"Введите поставщика:")
+    return B_SUPPLIER
+
+
+async def buyer_supplier(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data["buyer_data"]["supplier"] = update.message.text.strip()
+    await update.message.reply_text("Сумма?")
+    return B_AMOUNT
+
+
+async def buyer_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text.strip().replace(" ", "").replace(",", ".")
+    try:
+        amount = float(text)
+    except ValueError:
+        await update.message.reply_text("Не понял сумму, введите числом, например 42500")
+        return B_AMOUNT
+    context.user_data["buyer_data"]["amount"] = amount
+    await update.message.reply_text("Номер наряда / проекта?")
+    return B_NARYAD
+
+
+async def buyer_naryad(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data["buyer_data"]["naryad"] = update.message.text.strip()
+    await update.message.reply_text(
+        "Прикрепите фото или PDF счёта.")
+    return B_PHOTO
+
+
+async def buyer_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.message.photo:
+        file_id = update.message.photo[-1].file_id
+        is_document = False
+    elif update.message.document:
+        file_id = update.message.document.file_id
+        is_document = (update.message.document.mime_type or "") != "" and \
+            not (update.message.document.mime_type or "").startswith("image/")
+    else:
+        await update.message.reply_text("Это не похоже на фото или файл. Прикрепите счёт.")
+        return B_PHOTO
+
+    req_id = context.user_data["buyer_req_id"]
+    data = context.user_data["buyer_data"]
+
+    await core.process_need(
+        context.bot,
+        req_id,
+        supplier=data["supplier"],
+        amount=data["amount"],
+        naryad=data["naryad"],
+        photo_file_id=file_id,
+        is_document=is_document,
+        processed_by_name=update.effective_user.full_name,
+    )
+
+    req = db.get_by_id(req_id)
+    await update.message.reply_text(
+        f"Заявка {req['request_no']} оформлена и отправлена на одобрение директору.")
+    context.user_data.pop("buyer_req_id", None)
+    context.user_data.pop("buyer_data", None)
+    return ConversationHandler.END
+
+
+async def buyer_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data.pop("buyer_req_id", None)
+    context.user_data.pop("buyer_data", None)
+    await update.message.reply_text("Оформление отменено.")
+    return ConversationHandler.END
+
+
+# ---------- Кнопки: одобрение / оплата / логистика / платёжка ----------
 
 def _requester_label(uid: int, req) -> str:
-    # Кто запросил платёжку — для уведомления бухгалтеру.
     if core.is_driver(uid):
         return "Водитель"
     if core.is_director(uid):
@@ -217,21 +408,35 @@ async def action_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = query.from_user.id
     now_dt = datetime.now(config.TZ)
     now = now_dt.isoformat(timespec="seconds")
-    ts = now_dt.strftime("%d.%m %H:%M")
 
-    if action in ("approve", "reject"):
+    if action == "buyreject":
+        if not core.is_buyer(uid):
+            await query.answer("Отклонить может только закупщик.", show_alert=True)
+            return
+        if req["status"] != "потребность":
+            await query.answer("Потребность уже обработана.", show_alert=True)
+            return
+        await query.answer()
+        db.set_status(req_id, "отклонено", "processed_by", query.from_user.full_name,
+                      "processed_at", now)
+        req = db.get_by_id(req_id)
+        await core.refresh_all_cards(context.bot, req)
+        await notify(context, req["submitted_by_id"],
+                     f"✖ Потребность {req['request_no']} — отклонена закупщиком.")
+
+    elif action in ("approve", "reject"):
         if not core.is_director(uid):
             await query.answer("Подтверждать может только директор.", show_alert=True)
             return
-        if req["status"] != "отправлено":
+        if req["status"] != "оформлено":
             await query.answer("Заявка уже обработана.", show_alert=True)
             return
         await query.answer()
         if action == "approve":
             db.set_status(req_id, "одобрено", "approved_by", query.from_user.full_name, "approved_at", now)
             req = db.get_by_id(req_id)
-            await core.refresh_all_cards(context.bot, req)                  # у всех — прогресс на месте
-            await core.send_accountant_card(context.bot, req)              # бухгалтеру — карточка с «Оплатить»
+            await core.refresh_all_cards(context.bot, req)
+            await core.send_accountant_card(context.bot, req)
         else:
             db.set_status(req_id, "отклонено", "approved_by", query.from_user.full_name, "approved_at", now)
             req = db.get_by_id(req_id)
@@ -239,8 +444,6 @@ async def action_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await notify(context, req["submitted_by_id"], f"✖ Наряд {req['naryad']} — заявка отклонена.")
 
     elif action == "pay":
-        # Оплата в один тап — без обязательной платёжки. Платёжка теперь по запросу
-        # (кнопка «Запросить платёжку») или проактивно кнопкой «Прикрепить платёжку».
         if not core.is_accountant(uid):
             await query.answer("Оплатить может только бухгалтер.", show_alert=True)
             return
@@ -250,19 +453,17 @@ async def action_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.answer("Оплачено")
         db.set_status(req_id, "оплачено", "paid_by", query.from_user.full_name, "paid_at", now)
         req = db.get_by_id(req_id)
-        await core.refresh_all_cards(context.bot, req)     # у всех — прогресс + кнопки по статусу
-        await core.notify_paid(context.bot, req)           # пуш сотруднику: оплачено
-        await core.send_driver_card(context.bot, req)      # логистика: водителю
+        await core.refresh_all_cards(context.bot, req)
+        await core.notify_paid(context.bot, req)
+        await core.send_driver_card(context.bot, req)
 
     elif action == "needpay":
-        # Запросить платёжку по заявке. Кнопка у водителя, сотрудника-подателя, директора.
         allowed = (uid == req["submitted_by_id"] or core.is_driver(uid)
-                   or core.is_director(uid))
+                   or core.is_director(uid) or core.is_admin(uid))
         if not allowed:
             await query.answer("Недоступно.", show_alert=True)
             return
         if req["payment_file_id"]:
-            # Платёжка уже прикреплена — сразу отправляем запросившему, бухгалтера не трогаем.
             await core.send_payment_file_to(context.bot, req, uid)
             await query.answer("📄 Платёжка отправлена вам.")
             return
@@ -272,8 +473,6 @@ async def action_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         db.add_payment_pending(req_id, uid)
         await query.answer("✅ Запрос отправлен бухгалтеру.", show_alert=True)
-        # Пинг бухгалтеру — только на ПЕРВЫЙ запрос по заявке (очередь была пуста).
-        # Последующие запросы (в т.ч. от других людей) молча встают в очередь. FR-7/T5.
         if already:
             return
         label = _requester_label(uid, req)
@@ -287,7 +486,6 @@ async def action_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 log.warning("Не уведомить бухгалтера %s о запросе платёжки: %s", aid, e)
 
     elif action == "attach":
-        # Бухгалтер прикрепляет платёжку к конкретной заявке (следующий файл — сюда).
         if not core.is_accountant(uid):
             await query.answer("Только бухгалтер.", show_alert=True)
             return
@@ -300,8 +498,7 @@ async def action_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data["payment_prompt_msg_id"] = prompt.message_id
 
     elif action == "ship":
-        # Водитель поехал за товаром → складу приходит карточка «Принял на складе».
-        if not core.is_driver(uid):
+        if not core.is_driver(uid) and not core.is_admin(uid):
             await query.answer("Отметить может только водитель.", show_alert=True)
             return
         if req["status"] != "оплачено":
@@ -310,12 +507,11 @@ async def action_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.answer()
         db.set_status(req_id, "в_пути", "shipped_by", query.from_user.full_name, "shipped_at", now)
         req = db.get_by_id(req_id)
-        await core.refresh_all_cards(context.bot, req)                     # у всех — прогресс на месте
-        await core.send_warehouse_card(context.bot, req)                   # складу — кнопка «Принял»
+        await core.refresh_all_cards(context.bot, req)
+        await core.send_warehouse_card(context.bot, req)
 
     elif action == "receive":
-        # Склад/цех принял товар → заявка закрыта, сотруднику финальный пинг.
-        if not core.is_warehouse(uid):
+        if not core.is_warehouse(uid) and not core.is_admin(uid):
             await query.answer("Отметить может только склад.", show_alert=True)
             return
         if req["status"] != "в_пути":
@@ -324,17 +520,15 @@ async def action_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.answer()
         db.set_status(req_id, "получено", "received_by", query.from_user.full_name, "received_at", now)
         req = db.get_by_id(req_id)
-        await core.refresh_all_cards(context.bot, req)                     # у всех — прогресс на месте
+        await core.refresh_all_cards(context.bot, req)
         await notify(context, req["submitted_by_id"],
                      f"📦 Наряд {req['naryad']} — товар принят на складе.")
 
 
 async def accountant_payment_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Бухгалтер прислал платёжку после нажатия «Прикрепить» — цепляем к заявке и
-    # рассылаем тем, кто запросил. Оплата к этому моменту уже проставлена (один тап).
     req_id = context.user_data.get("awaiting_payment_for")
     if not req_id:
-        return  # файл прислан вне режима прикрепления — не наш случай
+        return
     if update.message.photo:
         file_id, is_document = update.message.photo[-1].file_id, 0
     elif update.message.document:
@@ -353,12 +547,10 @@ async def accountant_payment_received(update: Update, context: ContextTypes.DEFA
 
     db.set_payment_file(req_id, file_id, is_document)
     context.user_data.pop("awaiting_payment_for", None)
-    req = db.get_by_id(req_id)  # свежая версия, уже с платёжкой
+    req = db.get_by_id(req_id)
 
-    sent_to = await core.deliver_payment_to_pending(context.bot, req)   # всем, кто запросил
-    # Прогресс-блок на карточках не меняется — платёжка не статус; карточки не трогаем.
+    sent_to = await core.deliver_payment_to_pending(context.bot, req)
 
-    # Подтверждение бухгалтеру (правкой промпта, без лишнего сообщения).
     who = f" — отправлена запросившим ({len(sent_to)})" if sent_to else " — сохранена (запросов пока нет)"
     prompt_id = context.user_data.pop("payment_prompt_msg_id", None)
     text = f"✅ Платёжка по наряду {req['naryad']} прикреплена{who}."
@@ -379,10 +571,9 @@ async def notify(context: ContextTypes.DEFAULT_TYPE, user_id: int, text: str):
         log.warning("Не удалось отправить личное уведомление %s: %s", user_id, e)
 
 
-# ---------- Отчёт по кнопке ----------
+# ---------- Отчёт ----------
 
 async def report_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # «Административные» в отчёте видит только директор/бухгалтер, сотрудники — нет.
     sectors = config.ALL_SECTORS if is_privileged(update.effective_user.id) else config.SECTORS
     buttons = [InlineKeyboardButton(s, callback_data=f"report:{s}") for s in sectors]
     keyboard = [buttons[i:i + 2] for i in range(0, len(buttons), 2)]
@@ -393,7 +584,7 @@ async def report_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
-STATUS_MARK = {"отправлено": "🔵", "одобрено": "🟢", "оплачено": "🟥",
+STATUS_MARK = {"потребность": "📋", "оформлено": "📝", "одобрено": "🟢", "оплачено": "🟥",
                "в_пути": "🚚", "получено": "📦", "отклонено": "✖"}
 
 
@@ -402,7 +593,6 @@ async def report_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     sector = query.data.split(":", 1)[1]
     priv = is_privileged(query.from_user.id)
-    # Административные — только директору/бухгалтеру: и как отдельный фильтр, и внутри «Все».
     if sector == config.ADMIN_SECTOR and not priv:
         await query.edit_message_text("Раздел доступен только директору.")
         return
@@ -413,7 +603,7 @@ async def report_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         rows = [r for r in rows if r["sector"] != config.ADMIN_SECTOR]
 
     total = sum(r["amount"] for r in rows)
-    pending = sum(1 for r in rows if r["status"] in ("отправлено", "одобрено"))
+    pending = sum(1 for r in rows if r["status"] in ("потребность", "оформлено", "одобрено"))
 
     lines = [
         f"{sector} · {datetime.now(config.TZ):%m.%Y}", "",
@@ -421,8 +611,11 @@ async def report_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "",
     ]
     for r in rows[:10]:
-        amount_str = f"{r['amount']:,.0f}".replace(",", " ")
-        lines.append(f"{STATUS_MARK[r['status']]} наряд {r['naryad']} · {r['supplier']} · {amount_str}")
+        amount_str = f"{r['amount']:,.0f}".replace(",", " ") if r["amount"] > 0 else "—"
+        mark = STATUS_MARK.get(r["status"], "•")
+        supplier = r["supplier"] or "—"
+        naryad = r["naryad"] or (r.get("description") or "—")[:20]
+        lines.append(f"{mark} {naryad} · {supplier} · {amount_str}")
 
     if not rows:
         lines.append("Заявок за этот месяц пока нет.")
@@ -430,10 +623,11 @@ async def report_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.edit_message_text("\n".join(lines))
 
 
-# ---------- Мои заявки (монитор для сотрудника, в личке) ----------
+# ---------- Мои заявки ----------
 
 STATUS_SHORT = {
-    "отправлено": "отправлено",
+    "потребность": "у закупщика",
+    "оформлено": "ждёт одобрения",
     "одобрено": "ждёт оплаты",
     "оплачено": "оплачено",
     "в_пути": "в пути",
@@ -443,34 +637,29 @@ STATUS_SHORT = {
 
 
 def is_privileged(user_id: int) -> bool:
-    # Полный доступ (видят все заявки, /list, /report): админ, директор, бухгалтер.
-    # Директор — из .env ИЛИ назначенный админом; бухгалтер — из .env ИЛИ /assign.
     return (core.is_admin(user_id) or core.is_director(user_id)
-            or core.is_accountant(user_id))
+            or core.is_accountant(user_id) or core.is_buyer(user_id))
 
 
 NOT_ALLOWED_MSG = (
-    "Вы пока не закреплены за сектором, поэтому не можете подавать заявки.\n"
+    "Вы пока не закреплены за сектором, поэтому не можете подавать потребности.\n"
     "Обратитесь к директору — он добавит вас командой."
 )
 
 
 def may_submit(user_id: int) -> bool:
-    # Подавать заявки может закреплённый за сектором сотрудник или директор/бухгалтер.
-    if is_privileged(user_id):
+    if core.is_admin(user_id) or core.is_director(user_id) or core.is_accountant(user_id):
         return True
     p = db.get_person(user_id)
     return bool(p is not None and p["sector"])
 
 
 async def apply_menu(bot, user_id: int):
-    # Кнопка-меню (≡) ведёт на форму только у тех, кому можно подавать; у остальных
-    # — обычное меню команд (форму им открывать незачем).
     try:
         if config.WEBAPP_URL and may_submit(user_id):
             await bot.set_chat_menu_button(
                 chat_id=user_id,
-                menu_button=MenuButtonWebApp(text="Заявка", web_app=WebAppInfo(config.WEBAPP_URL)))
+                menu_button=MenuButtonWebApp(text="Потребность", web_app=WebAppInfo(config.WEBAPP_URL)))
         else:
             await bot.set_chat_menu_button(chat_id=user_id, menu_button=MenuButtonCommands())
     except Exception:
@@ -483,11 +672,12 @@ def format_requests(rows, title: str, show_sector: bool = False) -> str:
         lines.append("Заявок пока нет.")
         return "\n".join(lines)
     for r in rows:
-        amount_str = f"{r['amount']:,.0f}".replace(",", " ")
+        amount_str = f"{r['amount']:,.0f}".replace(",", " ") if r["amount"] > 0 else "—"
         mark = STATUS_MARK.get(r["status"], "•")
         short = STATUS_SHORT.get(r["status"], r["status"])
         sec = f"[{r['sector']}] " if show_sector else ""
-        lines.append(f"{mark} {sec}наряд {r['naryad']} · {r['supplier']} · {amount_str} — {short}")
+        label = r["naryad"] or (r.get("description") or "—")[:25]
+        lines.append(f"{mark} {sec}{label} · {amount_str} — {short}")
     return "\n".join(lines)
 
 
@@ -536,16 +726,13 @@ async def list_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.edit_message_text(text)
 
 
-# ---------- Назначение сотрудников за секторами (только директор) ----------
+# ---------- Назначение сотрудников ----------
 
 def _can_assign(user_id: int) -> bool:
-    # Назначать может директор (секторы + Бухгалтер/Водитель/Склад) и админ
-    # (дополнительно роль «Директор»).
     return core.is_director(user_id) or core.is_admin(user_id)
 
 
 def _assign_roles_for(actor_id: int):
-    # Директор раздаёт ROLES; админ — ещё и роль «Директор» (ADMIN_ROLES).
     return config.ADMIN_ROLES if core.is_admin(actor_id) else config.ROLES
 
 
@@ -568,10 +755,11 @@ async def assign_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Кого назначить? (сектор или роль)", reply_markup=InlineKeyboardMarkup(buttons))
 
 
-# Подписи кнопок ролей в /assign (значение в БД — из config.ROLES, без эмодзи).
 ROLE_LABEL = {
     config.ROLE_DIRECTOR: "👑 Директор",
     config.ROLE_ACCOUNTANT: "💰 Бухгалтер",
+    config.ROLE_ACCOUNTANT2: "💰 Бухгалтер 2",
+    config.ROLE_BUYER: "🛒 Закупщик",
     config.ROLE_DRIVER: "🚚 Водитель",
     config.ROLE_WAREHOUSE: "📦 Склад",
 }
@@ -587,11 +775,9 @@ async def assign_pick_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
     p = db.get_person(uid)
     name = (p["name"] if p else None) or str(uid)
     roles = _assign_roles_for(actor)
-    # Кнопки-цели: сначала производственные секторы, затем роли. Индекс в callback —
-    # позиция в общем списке SECTORS + roles (тот же порядок в assign_set).
     sec_btns = [InlineKeyboardButton(s, callback_data=f"asgset:{uid}:{i}")
                 for i, s in enumerate(config.SECTORS)]
-    role_btns = [InlineKeyboardButton(ROLE_LABEL[r], callback_data=f"asgset:{uid}:{len(config.SECTORS)+i}")
+    role_btns = [InlineKeyboardButton(ROLE_LABEL.get(r, r), callback_data=f"asgset:{uid}:{len(config.SECTORS)+i}")
                  for i, r in enumerate(roles)]
     keyboard = [sec_btns[i:i + 2] for i in range(0, len(sec_btns), 2)]
     keyboard += [role_btns[i:i + 2] for i in range(0, len(role_btns), 2)]
@@ -610,7 +796,6 @@ async def assign_set(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid, idx = int(uid_s), int(idx_s)
     p = db.get_person(uid)
     name = (p["name"] if p else None) or str(uid)
-    # Набор целей зависит от актора: у админа в конце добавлена роль «Директор».
     roles = _assign_roles_for(actor)
     targets = list(config.SECTORS) + roles
     if idx == -1:
@@ -619,7 +804,6 @@ async def assign_set(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(f"Готово: у «{name}» назначение снято.")
         return
     if idx < 0 or idx >= len(targets):
-        # Индекс вне диапазона (напр. директор нажал устаревшую кнопку «Директор»).
         await query.edit_message_text("Недоступно.")
         return
     target = targets[idx]
@@ -680,24 +864,45 @@ async def daily_backup(context: ContextTypes.DEFAULT_TYPE):
 def build_application() -> Application:
     app = Application.builder().token(config.BOT_TOKEN).build()
 
-    conv = ConversationHandler(
+    # Мастер сотрудника (потребность + админ-заявка директора)
+    employee_conv = ConversationHandler(
         entry_points=[
             CommandHandler("new", new_request),
             CommandHandler("new_text", new_wizard),
         ],
         states={
             SECTOR: [CallbackQueryHandler(sector_chosen, pattern=r"^sector:")],
-            SUPPLIER: [MessageHandler(filters.TEXT & ~filters.COMMAND, supplier_received)],
-            AMOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, amount_received)],
-            NARYAD: [MessageHandler(filters.TEXT & ~filters.COMMAND, naryad_received)],
-            PHOTO: [MessageHandler((filters.PHOTO | filters.Document.ALL) & ~filters.COMMAND, photo_received)],
+            DESCRIPTION: [MessageHandler(filters.TEXT & ~filters.COMMAND, description_received)],
+            NEEDED_BY: [MessageHandler(filters.TEXT & ~filters.COMMAND, needed_by_received)],
+            URGENCY: [CallbackQueryHandler(urgency_chosen, pattern=r"^urgency:")],
+            NEED_PHOTO: [
+                MessageHandler((filters.PHOTO | filters.Document.ALL) & ~filters.COMMAND, need_photo_received),
+                CallbackQueryHandler(need_skip_photo, pattern=r"^skipphoto$"),
+            ],
+            ADM_SUPPLIER: [MessageHandler(filters.TEXT & ~filters.COMMAND, adm_supplier_received)],
+            ADM_AMOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, adm_amount_received)],
+            ADM_NARYAD: [MessageHandler(filters.TEXT & ~filters.COMMAND, adm_naryad_received)],
+            ADM_PHOTO: [MessageHandler((filters.PHOTO | filters.Document.ALL) & ~filters.COMMAND, adm_photo_received)],
         },
         fallbacks=[CommandHandler("cancel", cancel)],
     )
 
+    # Мастер закупщика (оформление потребности → заявка)
+    buyer_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(buyer_start_process, pattern=r"^act:process:")],
+        states={
+            B_SUPPLIER: [MessageHandler(filters.TEXT & ~filters.COMMAND, buyer_supplier)],
+            B_AMOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, buyer_amount)],
+            B_NARYAD: [MessageHandler(filters.TEXT & ~filters.COMMAND, buyer_naryad)],
+            B_PHOTO: [MessageHandler((filters.PHOTO | filters.Document.ALL) & ~filters.COMMAND, buyer_photo)],
+        },
+        fallbacks=[CommandHandler("cancel", buyer_cancel)],
+    )
+
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("id", whoami))
-    app.add_handler(conv)
+    app.add_handler(employee_conv)
+    app.add_handler(buyer_conv)
     app.add_handler(CommandHandler("my", my_requests))
     app.add_handler(CommandHandler("list", list_requests))
     app.add_handler(CommandHandler("assign", assign_cmd))
@@ -708,11 +913,6 @@ def build_application() -> Application:
     app.add_handler(CallbackQueryHandler(assign_pick_user, pattern=r"^asg:"))
     app.add_handler(CallbackQueryHandler(assign_set, pattern=r"^asgset:"))
     app.add_handler(CallbackQueryHandler(action_callback, pattern=r"^act:"))
-    # Платёжка от бухгалтера (фото/PDF) — только после нажатия «Оплатить».
-    # Бухгалтер может быть задан и в .env, и назначен через /assign, поэтому фильтр
-    # по конкретному User не ставим: ловим фото/файл в личке и обрабатываем лишь при
-    # выставленном awaiting_payment_for (его выставляет только нажатие «Оплатить»).
-    # Регистрируем после ConversationHandler, чтобы не перехватывать шаг мастера.
     app.add_handler(MessageHandler(
         (filters.PHOTO | filters.Document.ALL) & filters.ChatType.PRIVATE & ~filters.COMMAND,
         accountant_payment_received))
@@ -733,15 +933,12 @@ async def run_all():
         except Exception as e:
             log.warning("Веб-сервер формы не запущен (%s). Бот работает без формы.", e)
 
-        # Подсказки команд и кнопка-меню (форма всегда под рукой).
         try:
             await app.bot.set_my_commands([
-                BotCommand("new", "Подать заявку"),
+                BotCommand("new", "Подать потребность"),
                 BotCommand("list", "Заявки"),
                 BotCommand("my", "Мои заявки"),
             ])
-            # Глобально по умолчанию — обычное меню команд. Форму на кнопке-меню
-            # включаем персонально закреплённым (см. apply_menu).
             await app.bot.set_chat_menu_button(menu_button=MenuButtonCommands())
         except Exception as e:
             log.warning("Не удалось настроить меню/команды: %s", e)
@@ -758,7 +955,7 @@ async def run_all():
             try:
                 loop.add_signal_handler(sig, stop_event.set)
             except NotImplementedError:
-                pass  # Windows
+                pass
         await stop_event.wait()
 
         log.info("Останавливаюсь…")

@@ -1,15 +1,15 @@
 """
 Общий код создания и публикации заявки.
 
-Используется двумя точками входа:
-  * мастер в личке (main.py, ConversationHandler);
-  * форма мини-приложения (webserver.py).
+Поток:
+  1. Сотрудник подаёт потребность (описание, дата, срочность) → publish_need
+  2. Закупщик оформляет (поставщик, сумма, наряд, счёт) → process_need
+  3. Директор одобряет → кнопка approve
+  4. Бухгалтер оплачивает → кнопка pay
+  5. Водитель забирает → кнопка ship
+  6. Склад принимает → кнопка receive
 
-Заявка НЕ публикуется в группу. Вместо этого:
-  * сотруднику уходит личная карточка-монитор (статус обновляется на месте);
-  * директору уходит карточка с кнопками «Одобрить/Отклонить»;
-  * после одобрения бухгалтеру уходит карточка с кнопкой «Оплатить»
-    (её отправляет send_accountant_card из обработчика кнопки).
+Административные заявки директора обходят закупщика: publish_request.
 """
 import logging
 from datetime import datetime
@@ -27,7 +27,21 @@ log = logging.getLogger("zakupki-core")
 
 def accountant_ids():
     ids = db.get_users_by_role(config.ROLE_ACCOUNTANT)
-    return ids if ids else ([config.ACCOUNTANT_ID] if config.ACCOUNTANT_ID else [])
+    ids2 = db.get_users_by_role(config.ROLE_ACCOUNTANT2)
+    result = ids + ids2
+    if not result:
+        fallback = []
+        if config.ACCOUNTANT_ID:
+            fallback.append(config.ACCOUNTANT_ID)
+        if config.ACCOUNTANT2_ID:
+            fallback.append(config.ACCOUNTANT2_ID)
+        return fallback
+    return result
+
+
+def buyer_ids():
+    ids = db.get_users_by_role(config.ROLE_BUYER)
+    return ids if ids else ([config.BUYER_ID] if config.BUYER_ID else [])
 
 
 def driver_ids():
@@ -41,14 +55,11 @@ def warehouse_ids():
 
 
 def director_ids():
-    # Директор из БД (роль «Директор») важнее .env. Если роль никому не назначена —
-    # работает DIRECTOR_ID из .env.
     ids = db.get_users_by_role(config.ROLE_DIRECTOR)
     return ids if ids else ([config.DIRECTOR_ID] if config.DIRECTOR_ID else [])
 
 
 def director_id() -> int:
-    # Единственный директор — для маршрутизации карточек одобрения. 0 — директора нет.
     ids = director_ids()
     return ids[0] if ids else 0
 
@@ -58,12 +69,15 @@ def is_director(uid: int) -> bool:
 
 
 def is_admin(uid: int) -> bool:
-    # Супер-админ — только из .env (ADMIN_ID). Назначает всех, включая директора.
     return bool(config.ADMIN_ID) and uid == config.ADMIN_ID
 
 
 def is_accountant(uid: int) -> bool:
     return uid in accountant_ids()
+
+
+def is_buyer(uid: int) -> bool:
+    return uid in buyer_ids()
 
 
 def is_driver(uid: int) -> bool:
@@ -74,8 +88,72 @@ def is_warehouse(uid: int) -> bool:
     return uid in warehouse_ids()
 
 
-def build_caption(request_no: str, sector: str, supplier: str, amount: float,
-                  naryad: str, submitter_name: str) -> str:
+# ---------- Форматирование ----------
+
+URGENCY_LABEL = {"обычная": "", "скоро": " ⚡", "срочно": " 🔴"}
+
+
+def _fmt_dt(iso) -> str:
+    try:
+        return datetime.fromisoformat(iso).strftime("%d.%m.%Y %H:%M")
+    except Exception:
+        return ""
+
+
+def _fmt_date(iso) -> str:
+    try:
+        return datetime.fromisoformat(iso).strftime("%d.%m.%Y")
+    except Exception:
+        return iso or ""
+
+
+def progress_block(req) -> str:
+    lines = [f"🔵 Подано — {_fmt_dt(req['submitted_at'])}"]
+    if req["status"] == "отклонено":
+        at = req.get("processed_at") or req.get("approved_at")
+        lines.append(f"✖ Отклонено — {_fmt_dt(at)}")
+        return "\n".join(lines)
+    if req.get("processed_at"):
+        lines.append(f"📝 Оформлено — {_fmt_dt(req['processed_at'])}")
+    if req.get("approved_at"):
+        lines.append(f"🟢 Одобрено — {_fmt_dt(req['approved_at'])}")
+    if req.get("paid_at"):
+        lines.append(f"🟥 Оплачено — {_fmt_dt(req['paid_at'])}")
+    if req.get("shipped_at"):
+        lines.append(f"🚚 В пути — {_fmt_dt(req['shipped_at'])}")
+    if req.get("received_at"):
+        lines.append(f"📦 На складе — {_fmt_dt(req['received_at'])}")
+    return "\n".join(lines)
+
+
+def build_need_text(req) -> str:
+    lines = []
+    if req["status"] == "потребность":
+        lines.append(f"📋 Потребность {req['request_no']}")
+    else:
+        lines.append(f"📋 Заявка {req['request_no']}")
+    lines.append(f"Сектор: {req['sector']}")
+    if req.get("description"):
+        lines.append(f"Что нужно: {req['description']}")
+    if req.get("needed_by"):
+        urg = URGENCY_LABEL.get(req.get("urgency") or "", "")
+        lines.append(f"Нужно к: {_fmt_date(req['needed_by'])}{urg}")
+    if req.get("supplier"):
+        lines.append(f"Поставщик: {req['supplier']}")
+    if req.get("amount") and req["amount"] > 0:
+        lines.append(f"Сумма: {req['amount']:,.0f}".replace(",", " "))
+    if req.get("naryad"):
+        lines.append(f"Наряд: {req['naryad']}")
+    lines.append(f"От: {req['submitted_by_name']}")
+    if req.get("processed_by"):
+        lines.append(f"Оформил: {req['processed_by']}")
+    lines.append(f"№ {req['request_no']}")
+    lines.append("")
+    lines.append(progress_block(req))
+    return "\n".join(lines)
+
+
+def build_caption(request_no, sector, supplier, amount, naryad, submitter_name) -> str:
     amount_str = f"{amount:,.0f}".replace(",", " ")
     return (
         f"🧾 Наряд {naryad}\n"
@@ -87,58 +165,26 @@ def build_caption(request_no: str, sector: str, supplier: str, amount: float,
     )
 
 
-def _fmt_dt(iso) -> str:
-    # Полные дата и время: «11.08.2026 12:42».
-    try:
-        return datetime.fromisoformat(iso).strftime("%d.%m.%Y %H:%M")
-    except Exception:
-        return ""
-
-
-def progress_block(req) -> str:
-    """Накопительная история статусов заявки — по строке на этап с датой и временем.
-
-    Одинаковая для ВСЕХ участников (сотрудник/директор/бухгалтер/водитель/склад),
-    внизу карточки. Показываются только пройденные этапы.
-    """
-    lines = [f"🔵 Подано — {_fmt_dt(req['submitted_at'])}"]
-    if req["status"] == "отклонено":
-        lines.append(f"✖ Отклонено — {_fmt_dt(req['approved_at'])}")
-        return "\n".join(lines)
-    if req["approved_at"]:
-        lines.append(f"🟢 Одобрено — {_fmt_dt(req['approved_at'])}")
-    if req["paid_at"]:
-        lines.append(f"🟥 Оплачено — {_fmt_dt(req['paid_at'])}")
-    if req["shipped_at"]:
-        lines.append(f"🚚 В пути — {_fmt_dt(req['shipped_at'])}")
-    if req["received_at"]:
-        lines.append(f"📦 На складе — {_fmt_dt(req['received_at'])}")
-    return "\n".join(lines)
-
-
 def build_full_caption(req) -> str:
-    # Шапка заявки + накопительный блок статусов. Единый вид у всех участников.
     base = build_caption(req["request_no"], req["sector"], req["supplier"],
                          req["amount"], req["naryad"], req["submitted_by_name"])
-    return base + "\n\n" + progress_block(req)
+    extra = ""
+    if req.get("description"):
+        extra += f"\nЧто нужно: {req['description']}"
+    if req.get("processed_by"):
+        extra += f"\nОформил: {req['processed_by']}"
+    return base + extra + "\n\n" + progress_block(req)
 
 
 # ---------- Кнопки платёжки ----------
 
 def needpay_kb(req_id):
-    """Кнопка «Запросить платёжку» (для водителя/сотрудника/директора)."""
     return InlineKeyboardMarkup([[
         InlineKeyboardButton("📄 Запросить платёжку", callback_data=f"act:needpay:{req_id}")
     ]])
 
 
 def attach_kb(req_id):
-    """Кнопка «Прикрепить платёжку» (для бухгалтера).
-
-    Есть PAYAPP_URL → открывает окно загрузки (Web App) с ?req=<id>: бухгалтер
-    выбирает файл в окне, тот цепляется к заявке (FR-1, FR-2).
-    Пусто → запасной путь через callback: бот попросит прислать файл сообщением (FR-8).
-    """
     if config.PAYAPP_URL:
         return InlineKeyboardMarkup([[
             InlineKeyboardButton(
@@ -150,20 +196,30 @@ def attach_kb(req_id):
     ]])
 
 
-# ---------- Клавиатуры по ролям (зависят от текущего статуса) ----------
+# ---------- Клавиатуры по ролям ----------
 
 def kb_needpay_or_none(req):
-    # Сотрудник/директор: кнопка запроса платёжки, пока заявка не закрыта.
     if req["status"] in ("получено", "отклонено"):
         return None
+    if req["status"] == "потребность":
+        return None
     return needpay_kb(req["id"])
+
+
+def kb_buyer(req):
+    if req["status"] != "потребность":
+        return None
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📝 Оформить заявку", callback_data=f"act:process:{req['id']}")],
+        [InlineKeyboardButton("✖ Отклонить", callback_data=f"act:buyreject:{req['id']}")],
+    ])
 
 
 def kb_accountant(req):
     if req["status"] == "одобрено":
         return InlineKeyboardMarkup([[
             InlineKeyboardButton("✅ Оплатить", callback_data=f"act:pay:{req['id']}")]])
-    return attach_kb(req["id"])  # оплачено и дальше — прикрепить платёжку
+    return attach_kb(req["id"])
 
 
 def kb_driver(req):
@@ -181,6 +237,21 @@ def kb_warehouse(req):
     return None
 
 
+def kb_admin(req):
+    if req["status"] in ("получено", "отклонено"):
+        return None
+    rows = []
+    if req["status"] == "оплачено":
+        rows.append([InlineKeyboardButton("🚚 Еду за товаром", callback_data=f"act:ship:{req['id']}")])
+    if req["status"] == "в_пути":
+        rows.append([InlineKeyboardButton("📦 Принял на складе", callback_data=f"act:receive:{req['id']}")])
+    if req["status"] not in ("потребность",):
+        rows.append([InlineKeyboardButton("📄 Запросить платёжку", callback_data=f"act:needpay:{req['id']}")])
+    return InlineKeyboardMarkup(rows) if rows else None
+
+
+# ---------- Отправка / редактирование ----------
+
 async def _edit_caption(bot, chat_id, msg_id, caption, reply_markup):
     if not chat_id or not msg_id:
         return
@@ -188,39 +259,62 @@ async def _edit_caption(bot, chat_id, msg_id, caption, reply_markup):
         await bot.edit_message_caption(
             chat_id=chat_id, message_id=msg_id, caption=caption, reply_markup=reply_markup)
     except Exception:
-        pass  # сообщение недоступно / без изменений — не критично
+        pass
+
+
+async def _edit_text(bot, chat_id, msg_id, text, reply_markup):
+    if not chat_id or not msg_id:
+        return
+    try:
+        await bot.edit_message_text(
+            chat_id=chat_id, message_id=msg_id, text=text, reply_markup=reply_markup)
+    except Exception:
+        pass
 
 
 async def refresh_all_cards(bot, req):
-    """Обновляет накопительный блок статусов на КАРТОЧКАХ ВСЕХ участников (на месте).
-
-    У каждого своя клавиатура по текущему статусу; редактируются только те карточки,
-    что уже существуют (по сохранённым message_id).
-    """
-    cap = build_full_caption(req)
+    text = build_need_text(req)
     npkb = kb_needpay_or_none(req)
-    await _edit_caption(bot, req["submitted_by_id"], req["notify_message_id"], cap, npkb)
-    did = director_id()
-    if did:
-        await _edit_caption(bot, did, req["director_msg_id"], cap, npkb)
-    if req["accountant_msg_id"]:
-        await _edit_caption(bot, next(iter(accountant_ids()), None),
-                            req["accountant_msg_id"], cap, kb_accountant(req))
-    if req["driver_msg_id"]:
-        await _edit_caption(bot, next(iter(driver_ids()), None),
-                            req["driver_msg_id"], cap, kb_driver(req))
-    if req["warehouse_msg_id"]:
-        await _edit_caption(bot, next(iter(warehouse_ids()), None),
-                            req["warehouse_msg_id"], cap, kb_warehouse(req))
+
+    # Текстовые карточки (потребности, монитор сотрудника)
+    await _edit_text(bot, req["submitted_by_id"], req["notify_message_id"], text, npkb)
+
+    # Карточка закупщика (текстовая)
+    for bid in buyer_ids():
+        if req.get("buyer_msg_id"):
+            await _edit_text(bot, bid, req["buyer_msg_id"], text, kb_buyer(req))
+
+    # Фото-карточки (существуют только после оформления закупщиком)
+    if req.get("photo_file_id"):
+        cap = build_full_caption(req)
+        did = director_id()
+        if did and req.get("director_msg_id"):
+            await _edit_caption(bot, did, req["director_msg_id"], cap, npkb)
+
+        acc_ids = accountant_ids()
+        if req.get("accountant_msg_id") and len(acc_ids) > 0:
+            await _edit_caption(bot, acc_ids[0], req["accountant_msg_id"], cap, kb_accountant(req))
+        if req.get("accountant2_msg_id") and len(acc_ids) > 1:
+            await _edit_caption(bot, acc_ids[1], req["accountant2_msg_id"], cap, kb_accountant(req))
+
+        if req.get("driver_msg_id"):
+            drv = driver_ids()
+            if drv:
+                await _edit_caption(bot, drv[0], req["driver_msg_id"], cap, kb_driver(req))
+        if req.get("warehouse_msg_id"):
+            wh = warehouse_ids()
+            if wh:
+                await _edit_caption(bot, wh[0], req["warehouse_msg_id"], cap, kb_warehouse(req))
+
+    if req.get("admin_msg_id") and config.ADMIN_ID:
+        cap = build_full_caption(req) if req.get("photo_file_id") else text
+        await _edit_caption(bot, config.ADMIN_ID, req["admin_msg_id"], cap, kb_admin(req))
 
 
 async def _send_card(bot, chat_id, media, caption, is_document, reply_markup=None,
                      reply_to_message_id=None):
-    """Отправляет карточку (фото или документ). Возвращает (message, file_id)."""
     extra = {}
     if reply_to_message_id:
-        # Платёжка уходит ответом на карточку-монитор сотрудника (появится с цитатой
-        # заявки). Если карточку удалили — шлём без привязки, а не роняем с ошибкой.
         extra = {"reply_to_message_id": reply_to_message_id,
                  "allow_sending_without_reply": True}
     if is_document:
@@ -234,105 +328,98 @@ async def _send_card(bot, chat_id, media, caption, is_document, reply_markup=Non
     return m, fid
 
 
-async def send_accountant_card(bot, req):
-    """Отправляет бухгалтеру(-ам) карточку одобренной заявки с кнопкой «Оплатить»."""
-    ids = accountant_ids()
-    if not ids or not req["photo_file_id"]:
-        return
-    caption = build_full_caption(req)
-    kb = kb_accountant(req)
-    for aid in ids:
+# ---------- Публикация потребности (сотрудник → закупщик) ----------
+
+async def publish_need(bot, *, sector: str, description: str, needed_by: str,
+                       urgency: str, submitter_id: int, submitter_name: str,
+                       photo_file_id: str = None, is_document: bool = False) -> str:
+    prefix = config.SECTOR_PREFIX[sector]
+    request_no = db.next_request_no(sector, prefix)
+    now = datetime.now(config.TZ).isoformat(timespec="seconds")
+
+    request_id = db.create_need(
+        request_no=request_no, sector=sector,
+        submitted_by_id=submitter_id, submitted_by_name=submitter_name,
+        submitted_at=now, description=description,
+        needed_by=needed_by, urgency=urgency,
+        need_photo_file_id=photo_file_id,
+        need_is_document=1 if is_document else 0,
+    )
+
+    req = db.get_by_id(request_id)
+    text = build_need_text(req)
+
+    # 1) Закупщику — карточка потребности с кнопкой «Оформить».
+    bids = buyer_ids()
+    for bid in bids:
         try:
-            m, _ = await _send_card(bot, aid, req["photo_file_id"], caption,
-                                    bool(req["is_document"]), reply_markup=kb)
-            db.set_accountant_msg(req["id"], m.message_id)
+            if photo_file_id:
+                m, fid = await _send_card(bot, bid, photo_file_id, text,
+                                          is_document, reply_markup=kb_buyer(req))
+                if fid and not req["need_photo_file_id"]:
+                    db.set_need_photo(request_id, fid, 1 if is_document else 0)
+            else:
+                m = await bot.send_message(bid, text, reply_markup=kb_buyer(req))
+            db.set_buyer_msg(request_id, m.message_id)
         except Exception as e:
-            log.warning("Не удалось отправить карточку бухгалтеру %s: %s", aid, e)
+            log.warning("Не удалось отправить потребность закупщику %s: %s", bid, e)
 
-
-async def notify_paid(bot, req):
-    """Оплата: короткое уведомление сотруднику (без платёжки — она теперь по запросу)."""
-    text = f"🧾 Наряд {req['naryad']} — оплачено, можно ехать за материалом."
+    # 2) Сотруднику — текстовый монитор.
     try:
-        await bot.send_message(req["submitted_by_id"], text)
-    except Exception as e:
-        log.warning("Не удалось уведомить сотрудника об оплате: %s", e)
+        m = await bot.send_message(submitter_id, text)
+        db.attach_notify_message(request_id, m.message_id)
+    except Exception:
+        pass
+
+    return request_no
 
 
-async def send_payment_file_to(bot, req, chat_id: int):
-    """Отправляет прикреплённую платёжку одному адресату (кто запросил)."""
-    if not req["payment_file_id"]:
-        return False
-    caption = f"🧾 Наряд {req['naryad']} — платёжка по закупке."
-    try:
-        await _send_card(bot, chat_id, req["payment_file_id"], caption,
-                         bool(req["payment_is_document"]))
-        return True
-    except Exception as e:
-        log.warning("Не удалось отправить платёжку %s: %s", chat_id, e)
-        return False
+# ---------- Оформление закупщиком (потребность → заявка) ----------
 
+async def process_need(bot, request_id: int, *, supplier: str, amount: float,
+                       naryad: str, photo_file_id: str, is_document: bool,
+                       processed_by_name: str) -> None:
+    now = datetime.now(config.TZ).isoformat(timespec="seconds")
+    db.update_need_to_request(
+        request_id, supplier=supplier, amount=amount, naryad=naryad,
+        photo_file_id=photo_file_id, is_document=1 if is_document else 0,
+        processed_by=processed_by_name, processed_at=now,
+    )
+    req = db.get_by_id(request_id)
 
-async def deliver_payment_to_pending(bot, req):
-    """Рассылает прикреплённую платёжку всем, кто её запросил, и очищает список."""
-    pending = db.get_payment_pending(req["id"])
-    for uid in pending:
-        await send_payment_file_to(bot, req, uid)
-    db.clear_payment_pending(req["id"])
-    return pending
-
-
-async def send_driver_card(bot, req):
-    """После оплаты — водителю карточку заявки с кнопкой «🚚 Еду за товаром».
-
-    Отдельным сообщением докидываем платёжку (если есть) — водитель показывает её
-    при получении товара. Заявка (счёт) и есть первый файл с кнопкой.
-    """
-    ids = driver_ids()
-    if not ids or not req["photo_file_id"]:
+    auto_approve = is_director(req["submitted_by_id"])
+    if auto_approve:
+        db.set_status(request_id, "одобрено", "approved_by", processed_by_name, "approved_at", now)
+        req = db.get_by_id(request_id)
+        await refresh_all_cards(bot, req)
+        await send_accountant_card(bot, req)
+        await send_admin_card(bot, req)
         return
-    if req["sector"] == config.ADMIN_SECTOR:
-        return  # административные платежи (аренда и т.п.) — без логистики
-    caption = build_full_caption(req)
-    kb = kb_driver(req)
-    for did in ids:
+
+    cap = build_full_caption(req)
+    kb = InlineKeyboardMarkup([[
+        InlineKeyboardButton("🟢 Одобрить", callback_data=f"act:approve:{request_id}"),
+        InlineKeyboardButton("✖ Отклонить", callback_data=f"act:reject:{request_id}"),
+    ]])
+    did = director_id()
+    if did:
         try:
-            m, _ = await _send_card(bot, did, req["photo_file_id"], caption,
-                                    bool(req["is_document"]), reply_markup=kb)
-            db.set_driver_msg(req["id"], m.message_id)
-            # Если платёжка уже приложена (бухгалтер прикрепил заранее) — сразу шлём.
-            if req["payment_file_id"]:
-                await send_payment_file_to(bot, req, did)
+            dm, _ = await _send_card(bot, did, photo_file_id, cap, is_document, reply_markup=kb)
+            db.set_director_msg(request_id, dm.message_id)
         except Exception as e:
-            log.warning("Не удалось отправить карточку водителю %s: %s", did, e)
+            log.warning("Не удалось отправить карточку директору: %s", e)
+
+    await refresh_all_cards(bot, req)
+    await send_admin_card(bot, req)
 
 
-async def send_warehouse_card(bot, req):
-    """После «Еду за товаром» — складу карточку с кнопкой «📦 Принял на складе»."""
-    ids = warehouse_ids()
-    if not ids or not req["photo_file_id"]:
-        return
-    caption = build_full_caption(req)
-    kb = kb_warehouse(req)
-    for wid in ids:
-        try:
-            m, _ = await _send_card(bot, wid, req["photo_file_id"], caption,
-                                    bool(req["is_document"]), reply_markup=kb)
-            db.set_warehouse_msg(req["id"], m.message_id)
-        except Exception as e:
-            log.warning("Не удалось отправить карточку складу %s: %s", wid, e)
-
+# ---------- Публикация административной заявки (директор, без закупщика) ----------
 
 async def publish_request(bot, *, sector: str, supplier: str, amount: float,
                           naryad: str, submitter_id: int, submitter_name: str,
                           photo_file_id: str = None,
                           file_bytes: bytes = None, file_name: str = None,
                           is_document: bool = False) -> str:
-    """Создаёт заявку в БД и рассылает карточки (директору с кнопками + сотруднику).
-
-    Файл счёта: либо photo_file_id (уже в Telegram), либо file_bytes (+file_name).
-    Возвращает номер заявки (напр. 'ПОК-310726-03').
-    """
     prefix = config.SECTOR_PREFIX[sector]
     request_no = db.next_request_no(sector, prefix)
     now_dt = datetime.now(config.TZ)
@@ -344,11 +431,15 @@ async def publish_request(bot, *, sector: str, supplier: str, amount: float,
         submitted_by_name=submitter_name, submitted_at=now,
         is_document=1 if is_document else 0,
     )
+    db.update_need_to_request(
+        request_id, supplier=supplier, amount=amount, naryad=naryad,
+        photo_file_id=photo_file_id, is_document=1 if is_document else 0,
+        processed_by=submitter_name, processed_at=now,
+    )
 
     stored = {"file_id": photo_file_id}
 
     def media():
-        # Пока нет постоянного file_id — шлём байты; потом переиспользуем file_id.
         if stored["file_id"]:
             return stored["file_id"]
         return InputFile(BytesIO(file_bytes), filename=file_name or "invoice")
@@ -358,7 +449,6 @@ async def publish_request(bot, *, sector: str, supplier: str, amount: float,
             stored["file_id"] = fid
             db.set_photo_file_id(request_id, fid)
 
-    # Заявка самого директора — сразу одобрена, идёт бухгалтеру (без «одобрить себя»).
     auto_approve = is_director(submitter_id)
 
     if auto_approve:
@@ -372,11 +462,11 @@ async def publish_request(bot, *, sector: str, supplier: str, amount: float,
         except Exception:
             pass
         await send_accountant_card(bot, db.get_by_id(request_id))
+        afid = await send_admin_card(bot, db.get_by_id(request_id), media())
+        remember(afid)
         return request_no
 
     full_caption = build_full_caption(db.get_by_id(request_id))
-
-    # 1) Директору — карточка с кнопками одобрения. Заодно получаем file_id.
     kb = InlineKeyboardMarkup([[
         InlineKeyboardButton("🟢 Одобрить", callback_data=f"act:approve:{request_id}"),
         InlineKeyboardButton("✖ Отклонить", callback_data=f"act:reject:{request_id}"),
@@ -391,14 +481,115 @@ async def publish_request(bot, *, sector: str, supplier: str, amount: float,
         except Exception as e:
             log.warning("Не удалось отправить карточку директору: %s", e)
 
-    # 2) Сотруднику — личная карточка-монитор (она же подтверждение подачи).
-    card_caption = full_caption
     try:
-        card, fid = await _send_card(bot, submitter_id, media(), card_caption,
+        card, fid = await _send_card(bot, submitter_id, media(), full_caption,
                                      is_document, reply_markup=needpay_kb(request_id))
         remember(fid)
         db.attach_notify_message(request_id, card.message_id)
     except Exception:
-        pass  # сотрудник не нажимал /start — личную карточку отправить нельзя
+        pass
 
+    afid = await send_admin_card(bot, db.get_by_id(request_id), media())
+    remember(afid)
     return request_no
+
+
+# ---------- Отправка карточек по ролям ----------
+
+async def send_accountant_card(bot, req):
+    ids = accountant_ids()
+    if not ids or not req["photo_file_id"]:
+        return
+    caption = build_full_caption(req)
+    kb = kb_accountant(req)
+    for i, aid in enumerate(ids):
+        try:
+            m, _ = await _send_card(bot, aid, req["photo_file_id"], caption,
+                                    bool(req["is_document"]), reply_markup=kb)
+            if i == 0:
+                db.set_accountant_msg(req["id"], m.message_id)
+            else:
+                db.set_accountant2_msg(req["id"], m.message_id)
+        except Exception as e:
+            log.warning("Не удалось отправить карточку бухгалтеру %s: %s", aid, e)
+
+
+async def notify_paid(bot, req):
+    text = f"🧾 Наряд {req['naryad']} — оплачено, можно ехать за материалом."
+    try:
+        await bot.send_message(req["submitted_by_id"], text)
+    except Exception as e:
+        log.warning("Не удалось уведомить сотрудника об оплате: %s", e)
+
+
+async def send_payment_file_to(bot, req, chat_id: int):
+    if not req["payment_file_id"]:
+        return False
+    caption = f"🧾 Наряд {req['naryad']} — платёжка по закупке."
+    try:
+        await _send_card(bot, chat_id, req["payment_file_id"], caption,
+                         bool(req["payment_is_document"]))
+        return True
+    except Exception as e:
+        log.warning("Не удалось отправить платёжку %s: %s", chat_id, e)
+        return False
+
+
+async def deliver_payment_to_pending(bot, req):
+    pending = db.get_payment_pending(req["id"])
+    for uid in pending:
+        await send_payment_file_to(bot, req, uid)
+    db.clear_payment_pending(req["id"])
+    return pending
+
+
+async def send_driver_card(bot, req):
+    ids = driver_ids()
+    if not ids or not req["photo_file_id"]:
+        return
+    if req["sector"] == config.ADMIN_SECTOR:
+        return
+    caption = build_full_caption(req)
+    kb = kb_driver(req)
+    for did in ids:
+        try:
+            m, _ = await _send_card(bot, did, req["photo_file_id"], caption,
+                                    bool(req["is_document"]), reply_markup=kb)
+            db.set_driver_msg(req["id"], m.message_id)
+            if req["payment_file_id"]:
+                await send_payment_file_to(bot, req, did)
+        except Exception as e:
+            log.warning("Не удалось отправить карточку водителю %s: %s", did, e)
+
+
+async def send_warehouse_card(bot, req):
+    ids = warehouse_ids()
+    if not ids or not req["photo_file_id"]:
+        return
+    caption = build_full_caption(req)
+    kb = kb_warehouse(req)
+    for wid in ids:
+        try:
+            m, _ = await _send_card(bot, wid, req["photo_file_id"], caption,
+                                    bool(req["is_document"]), reply_markup=kb)
+            db.set_warehouse_msg(req["id"], m.message_id)
+        except Exception as e:
+            log.warning("Не удалось отправить карточку складу %s: %s", wid, e)
+
+
+async def send_admin_card(bot, req, file_id_or_input=None):
+    if not config.ADMIN_ID or not req["photo_file_id"]:
+        return None
+    if req["submitted_by_id"] == config.ADMIN_ID:
+        return None
+    caption = build_full_caption(req)
+    kb = kb_admin(req)
+    media = file_id_or_input or req["photo_file_id"]
+    try:
+        m, fid = await _send_card(bot, config.ADMIN_ID, media, caption,
+                                  bool(req["is_document"]), reply_markup=kb)
+        db.set_admin_msg(req["id"], m.message_id)
+        return fid
+    except Exception as e:
+        log.warning("Не удалось отправить карточку админу: %s", e)
+        return None
