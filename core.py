@@ -335,7 +335,7 @@ async def publish_request(bot, *, sector: str, supplier: str, amount: float,
     """
     prefix = config.SECTOR_PREFIX[sector]
     request_no = db.next_request_no(sector, prefix)
-    now_dt = datetime.now()
+    now_dt = datetime.now(config.TZ)
     now = now_dt.isoformat(timespec="seconds")
 
     request_id = db.create_request(

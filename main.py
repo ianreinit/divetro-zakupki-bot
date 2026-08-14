@@ -1,6 +1,9 @@
 import asyncio
 import logging
+import os
 import signal
+import sqlite3
+from contextlib import closing
 from datetime import datetime, time as dtime
 
 from telegram import (
@@ -212,7 +215,7 @@ async def action_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     uid = query.from_user.id
-    now_dt = datetime.now()
+    now_dt = datetime.now(config.TZ)
     now = now_dt.isoformat(timespec="seconds")
     ts = now_dt.strftime("%d.%m %H:%M")
 
@@ -404,7 +407,7 @@ async def report_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("Раздел доступен только директору.")
         return
 
-    month_start = datetime.now().replace(day=1, hour=0, minute=0, second=0).isoformat(timespec="seconds")
+    month_start = datetime.now(config.TZ).replace(day=1, hour=0, minute=0, second=0).isoformat(timespec="seconds")
     rows = db.report(sector, month_start)
     if not priv:
         rows = [r for r in rows if r["sector"] != config.ADMIN_SECTOR]
@@ -413,7 +416,7 @@ async def report_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     pending = sum(1 for r in rows if r["status"] in ("отправлено", "одобрено"))
 
     lines = [
-        f"{sector} · {datetime.now():%m.%Y}", "",
+        f"{sector} · {datetime.now(config.TZ):%m.%Y}", "",
         f"Заявок: {len(rows)}  ·  Сумма: {total:,.0f}  ·  В ожидании: {pending}".replace(",", " "),
         "",
     ]
@@ -646,53 +649,30 @@ async def employees_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("\n".join(lines))
 
 
-# ---------- Напоминания об окне приёма заявок ----------
+# ---------- Бэкап базы ----------
 
-async def window_open(context: ContextTypes.DEFAULT_TYPE):
-    ch, cm = config.WINDOW_SUBMIT_CLOSE
-    msg = await context.bot.send_message(
-        config.GROUP_CHAT_ID, f"🕐 Окно приёма заявок открыто до {ch:02d}:{cm:02d}"
-    )
-    try:
-        await context.bot.pin_chat_message(config.GROUP_CHAT_ID, msg.message_id, disable_notification=True)
-    except Exception as e:
-        log.warning("Не удалось закрепить сообщение (бот админ в группе?): %s", e)
-    context.bot_data["window_msg_id"] = msg.message_id
-
-
-async def window_reminder(context: ContextTypes.DEFAULT_TYPE):
-    msg_id = context.bot_data.get("window_msg_id")
-    if not msg_id:
+async def daily_backup(context: ContextTypes.DEFAULT_TYPE):
+    if not config.ADMIN_ID:
         return
-    ch, cm = config.WINDOW_SUBMIT_CLOSE
-    await context.bot.edit_message_text(
-        chat_id=config.GROUP_CHAT_ID, message_id=msg_id,
-        text=f"🕐 Окно приёма заявок открыто до {ch:02d}:{cm:02d}\n⏰ Осталось 10 минут",
-    )
-
-
-async def window_close(context: ContextTypes.DEFAULT_TYPE):
-    msg_id = context.bot_data.get("window_msg_id")
-    if not msg_id:
+    db_path = os.path.abspath(config.DB_PATH)
+    if not os.path.isfile(db_path):
         return
-    await context.bot.edit_message_text(
-        chat_id=config.GROUP_CHAT_ID, message_id=msg_id, text="✅ Окно приёма заявок закрыто на сегодня",
+    now = datetime.now(config.TZ)
+    size_kb = os.path.getsize(db_path) / 1024
+    with closing(sqlite3.connect(db_path)) as conn:
+        req_count = conn.execute("SELECT COUNT(*) FROM requests").fetchone()[0]
+        ppl_count = conn.execute("SELECT COUNT(*) FROM people").fetchone()[0]
+    caption = (
+        f"💾 Бэкап базы данных\n"
+        f"📅 {now:%d.%m.%Y %H:%M}\n"
+        f"📊 Заявок: {req_count} · Сотрудников: {ppl_count}\n"
+        f"📦 Размер: {size_kb:.0f} КБ"
     )
-    try:
-        await context.bot.unpin_chat_message(config.GROUP_CHAT_ID, msg_id)
-    except Exception as e:
-        log.warning("Не удалось открепить сообщение: %s", e)
-
-
-def schedule_jobs(app: Application):
-    jq = app.job_queue
-    oh, om = config.WINDOW_SUBMIT_OPEN
-    ch, cm = config.WINDOW_SUBMIT_CLOSE
-    reminder_h, reminder_m = (ch, cm - 10) if cm >= 10 else (ch - 1, cm + 50)
-
-    jq.run_daily(window_open, time=dtime(oh, om))
-    jq.run_daily(window_reminder, time=dtime(reminder_h, reminder_m))
-    jq.run_daily(window_close, time=dtime(ch, cm))
+    filename = f"zakupki_{now:%Y-%m-%d}.db"
+    with open(db_path, "rb") as f:
+        await context.bot.send_document(
+            config.ADMIN_ID, document=f, filename=filename, caption=caption)
+    log.info("Бэкап отправлен админу (%s, %.0f КБ)", filename, size_kb)
 
 
 # ---------- Запуск ----------
@@ -737,8 +717,6 @@ def build_application() -> Application:
         (filters.PHOTO | filters.Document.ALL) & filters.ChatType.PRIVATE & ~filters.COMMAND,
         accountant_payment_received))
 
-    # Оконные напоминания были групповыми — без группы отключены.
-    # schedule_jobs(app)
     return app
 
 
@@ -767,6 +745,11 @@ async def run_all():
             await app.bot.set_chat_menu_button(menu_button=MenuButtonCommands())
         except Exception as e:
             log.warning("Не удалось настроить меню/команды: %s", e)
+
+        if config.ADMIN_ID:
+            app.job_queue.run_daily(
+                daily_backup, time=dtime(18, 30, tzinfo=config.TZ))
+            log.info("Бэкап базы запланирован на 18:30 (%s)", config.TZ)
 
         log.info("Бот запущен")
         stop_event = asyncio.Event()

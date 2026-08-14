@@ -1,7 +1,11 @@
 import os
+from zoneinfo import ZoneInfo
+
 from dotenv import load_dotenv
 
 load_dotenv()
+
+TZ = ZoneInfo("Europe/Chisinau")
 
 
 def _int_env(name: str) -> int:
@@ -65,14 +69,6 @@ ADMIN_ROLES = ROLES + [ROLE_DIRECTOR]
 REACTION_APPROVE = "👍"
 REACTION_REJECT = "👎"
 REACTION_PAID = "🎉"
-
-# Окна работы, час:минута, 24-часовой формат, часовой пояс сервера
-# Приём заявок: 15:00-16:00. Проверка директором и оплата бухгалтером
-# объединены в один час: 16:00-17:00 (обе метки закрытия совпадают).
-WINDOW_SUBMIT_OPEN = (15, 0)
-WINDOW_SUBMIT_CLOSE = (16, 0)
-WINDOW_REVIEW_CLOSE = (17, 0)
-WINDOW_PAY_CLOSE = (17, 0)
 
 DB_PATH = os.getenv("DB_PATH", "zakupki.db")
 

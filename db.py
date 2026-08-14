@@ -2,6 +2,7 @@ import sqlite3
 from contextlib import closing
 from datetime import datetime
 
+import config
 from config import DB_PATH
 
 SCHEMA = """
@@ -157,7 +158,7 @@ def list_people():
 
 
 def next_request_no(sector: str, prefix: str) -> str:
-    today = datetime.now().strftime("%d%m%y")
+    today = datetime.now(config.TZ).strftime("%d%m%y")
     with closing(sqlite3.connect(DB_PATH)) as conn:
         cur = conn.execute(
             "SELECT COUNT(*) FROM requests WHERE sector = ? AND request_no LIKE ?",
