@@ -29,6 +29,12 @@ SECTOR, DESCRIPTION, NEEDED_BY, URGENCY, NEED_PHOTO = range(5)
 ADM_SUPPLIER, ADM_AMOUNT, ADM_NARYAD, ADM_PHOTO = range(5, 9)
 # Состояния мастера закупщика (оформление потребности в заявку)
 B_SUPPLIER, B_AMOUNT, B_NARYAD, B_PHOTO = range(4)
+# Состояния мастера редактирования отклонённой заявки (закупщик)
+E_SUPPLIER, E_AMOUNT, E_NARYAD, E_PHOTO = range(9, 13)
+# Состояние ожидания причины отклонения (директор)
+REJECT_REASON = 13
+# Состояние ожидания файла платёжки (бухгалтер)
+PAYMENT_FILE = 14
 
 
 # ---------- /start ----------
@@ -41,14 +47,15 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await apply_menu(context.bot, user.id)
 
     role = person["role"] if person else None
-    if is_privileged(user.id) or (person is not None and person["sector"]):
+    if may_submit(user.id):
         sector_line = f"Ваш сектор: {person['sector']}\n" if (person and person["sector"]) else ""
+        role_line = f"Ваша роль: {role}\n" if (role and not person.get("sector")) else ""
         kb = None
-        if config.WEBAPP_URL and may_submit(user.id):
+        if config.WEBAPP_URL:
             kb = InlineKeyboardMarkup([[InlineKeyboardButton(
                 "📋 Подать потребность", web_app=WebAppInfo(config.WEBAPP_URL))]])
         await update.message.reply_text(
-            f"Привет, {user.first_name}! Я бот закупок.\n{sector_line}\n"
+            f"Привет, {user.first_name}! Я бот закупок.\n{sector_line}{role_line}\n"
             "📋 /new — подать потребность\n"
             "📋 /list — заявки\n"
             "📋 /my — мои заявки",
@@ -135,8 +142,18 @@ async def sector_chosen(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # --- Упрощённый путь: потребность ---
 
+MAX_DESCRIPTION = 500
+MAX_SUPPLIER = 200
+MAX_NARYAD = 100
+MAX_REJECT_REASON = 300
+
+
 async def description_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data["description"] = update.message.text.strip()
+    text = update.message.text.strip()
+    if len(text) > MAX_DESCRIPTION:
+        await update.message.reply_text(f"Слишком длинное описание (макс. {MAX_DESCRIPTION} символов).")
+        return DESCRIPTION
+    context.user_data["description"] = text
     await update.message.reply_text(
         "К какой дате нужно? (ДД.ММ, например 25.08)")
     return NEEDED_BY
@@ -229,7 +246,11 @@ async def need_skip_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # --- Админ-путь (директор, полная заявка) ---
 
 async def adm_supplier_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data["supplier"] = update.message.text.strip()
+    text = update.message.text.strip()
+    if len(text) > MAX_SUPPLIER:
+        await update.message.reply_text(f"Слишком длинное название (макс. {MAX_SUPPLIER} символов).")
+        return ADM_SUPPLIER
+    context.user_data["supplier"] = text
     await update.message.reply_text("Сумма?")
     return ADM_AMOUNT
 
@@ -247,7 +268,11 @@ async def adm_amount_received(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 
 async def adm_naryad_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data["naryad"] = update.message.text.strip()
+    text = update.message.text.strip()
+    if len(text) > MAX_NARYAD:
+        await update.message.reply_text(f"Слишком длинный наряд (макс. {MAX_NARYAD} символов).")
+        return ADM_NARYAD
+    context.user_data["naryad"] = text
     await update.message.reply_text(
         "Прикрепите фото или PDF счёта — без него заявку отправить нельзя."
     )
@@ -319,7 +344,11 @@ async def buyer_start_process(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 
 async def buyer_supplier(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data["buyer_data"]["supplier"] = update.message.text.strip()
+    text = update.message.text.strip()
+    if len(text) > MAX_SUPPLIER:
+        await update.message.reply_text(f"Слишком длинное название (макс. {MAX_SUPPLIER} символов).")
+        return B_SUPPLIER
+    context.user_data["buyer_data"]["supplier"] = text
     await update.message.reply_text("Сумма?")
     return B_AMOUNT
 
@@ -337,7 +366,11 @@ async def buyer_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def buyer_naryad(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data["buyer_data"]["naryad"] = update.message.text.strip()
+    text = update.message.text.strip()
+    if len(text) > MAX_NARYAD:
+        await update.message.reply_text(f"Слишком длинный наряд (макс. {MAX_NARYAD} символов).")
+        return B_NARYAD
+    context.user_data["buyer_data"]["naryad"] = text
     await update.message.reply_text(
         "Прикрепите фото или PDF счёта.")
     return B_PHOTO
@@ -366,6 +399,7 @@ async def buyer_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         naryad=data["naryad"],
         photo_file_id=file_id,
         is_document=is_document,
+        processed_by_id=update.effective_user.id,
         processed_by_name=update.effective_user.full_name,
     )
 
@@ -384,6 +418,125 @@ async def buyer_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 
+# ---------- Мастер редактирования отклонённой заявки (закупщик) ----------
+
+async def edit_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    _, action, req_id_s = query.data.split(":")
+    req_id = int(req_id_s)
+    req = db.get_by_id(req_id)
+
+    if req is None:
+        await query.answer("Заявка не найдена.", show_alert=True)
+        return ConversationHandler.END
+    if not core.is_buyer(query.from_user.id):
+        await query.answer("Изменить может только закупщик.", show_alert=True)
+        return ConversationHandler.END
+    if req["status"] != "отклонено":
+        await query.answer("Заявку можно изменить только после отклонения.", show_alert=True)
+        return ConversationHandler.END
+
+    await query.answer()
+    context.user_data["edit_req_id"] = req_id
+    context.user_data["edit_data"] = {}
+
+    amount_str = f"{req['amount']:,.0f}".replace(",", " ")
+    await query.edit_message_text(
+        f"Редактирование заявки {req['request_no']}\n"
+        f"Текущий поставщик: {req['supplier']}\n"
+        f"Текущая сумма: {amount_str}\n"
+        f"Текущий наряд: {req['naryad']}\n\n"
+        f"Введите поставщика:")
+    return E_SUPPLIER
+
+
+async def edit_supplier(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text.strip()
+    if len(text) > MAX_SUPPLIER:
+        await update.message.reply_text(f"Слишком длинное название (макс. {MAX_SUPPLIER} символов).")
+        return E_SUPPLIER
+    context.user_data["edit_data"]["supplier"] = text
+    await update.message.reply_text("Сумма?")
+    return E_AMOUNT
+
+
+async def edit_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text.strip().replace(" ", "").replace(",", ".")
+    try:
+        amount = float(text)
+    except ValueError:
+        await update.message.reply_text("Не понял сумму, введите числом, например 42500")
+        return E_AMOUNT
+    context.user_data["edit_data"]["amount"] = amount
+    await update.message.reply_text("Номер наряда / проекта?")
+    return E_NARYAD
+
+
+async def edit_naryad(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text.strip()
+    if len(text) > MAX_NARYAD:
+        await update.message.reply_text(f"Слишком длинный наряд (макс. {MAX_NARYAD} символов).")
+        return E_NARYAD
+    context.user_data["edit_data"]["naryad"] = text
+    await update.message.reply_text("Прикрепите фото или PDF счёта.")
+    return E_PHOTO
+
+
+async def edit_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.message.photo:
+        file_id = update.message.photo[-1].file_id
+        is_document = False
+    elif update.message.document:
+        file_id = update.message.document.file_id
+        is_document = (update.message.document.mime_type or "") != "" and \
+            not (update.message.document.mime_type or "").startswith("image/")
+    else:
+        await update.message.reply_text("Это не похоже на фото или файл. Прикрепите счёт.")
+        return E_PHOTO
+
+    req_id = context.user_data["edit_req_id"]
+    data = context.user_data["edit_data"]
+    now = datetime.now(config.TZ).isoformat(timespec="seconds")
+
+    db.reset_rejected(req_id)
+    db.update_need_to_request(
+        req_id,
+        supplier=data["supplier"],
+        amount=data["amount"],
+        naryad=data["naryad"],
+        photo_file_id=file_id,
+        is_document=1 if is_document else 0,
+        processed_by=update.effective_user.full_name,
+        processed_at=now,
+    )
+    req = db.get_by_id(req_id)
+
+    cap = core.build_full_caption(req)
+    kb = core.kb_director_approve(req_id)
+    did = core.director_id()
+    if did:
+        try:
+            dm, _ = await core._send_card(context.bot, did, file_id, cap,
+                                          is_document, reply_markup=kb)
+            db.set_director_msg(req_id, dm.message_id)
+        except Exception as e:
+            log.warning("Не удалось отправить изменённую карточку директору: %s", e)
+
+    await core.refresh_all_cards(context.bot, req)
+    await update.message.reply_text(
+        f"Заявка {req['request_no']} изменена и отправлена директору на повторное рассмотрение.")
+    context.user_data.pop("edit_req_id", None)
+    context.user_data.pop("edit_data", None)
+    return ConversationHandler.END
+
+
+async def edit_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data.pop("edit_req_id", None)
+    context.user_data.pop("edit_data", None)
+    await update.message.reply_text("Редактирование отменено.")
+    return ConversationHandler.END
+
+
 # ---------- Кнопки: одобрение / оплата / логистика / платёжка ----------
 
 def _requester_label(uid: int, req) -> str:
@@ -396,139 +549,202 @@ def _requester_label(uid: int, req) -> str:
     return f"{name} · {req['sector']}"
 
 
-async def action_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def _act_buyreject(query, context, req, req_id, uid, now):
+    if not core.is_buyer(uid):
+        await query.answer("Отклонить может только закупщик.", show_alert=True)
+        return
+    if req["status"] != "потребность":
+        await query.answer("Потребность уже обработана.", show_alert=True)
+        return
+    await query.answer()
+    db.set_status(req_id, "отклонено", "processed_by", query.from_user.full_name,
+                  "processed_at", now)
+    db.log_action(req_id, "отклонено_закупщиком", uid, query.from_user.full_name)
+    req = db.get_by_id(req_id)
+    await core.refresh_all_cards(context.bot, req)
+    await notify(context, req["submitted_by_id"],
+                 f"✖ Потребность {req['request_no']} — отклонена закупщиком.")
+
+
+async def _act_approve(query, context, req, req_id, uid, now):
+    if not core.is_director(uid):
+        await query.answer("Подтверждать может только директор.", show_alert=True)
+        return
+    if req["status"] != "оформлено":
+        await query.answer("Заявка уже обработана.", show_alert=True)
+        return
+    await query.answer()
+    db.set_status(req_id, "одобрено", "approved_by", query.from_user.full_name, "approved_at", now)
+    db.log_action(req_id, "одобрено", uid, query.from_user.full_name)
+    req = db.get_by_id(req_id)
+    await core.refresh_all_cards(context.bot, req)
+    await core.send_accountant_card(context.bot, req)
+
+
+async def reject_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     _, action, req_id_s = query.data.split(":")
     req_id = int(req_id_s)
     req = db.get_by_id(req_id)
+
     if req is None:
         await query.answer("Заявка не найдена.", show_alert=True)
-        return
+        return ConversationHandler.END
+    if not core.is_director(query.from_user.id):
+        await query.answer("Подтверждать может только директор.", show_alert=True)
+        return ConversationHandler.END
+    if req["status"] != "оформлено":
+        await query.answer("Заявка уже обработана.", show_alert=True)
+        return ConversationHandler.END
 
-    uid = query.from_user.id
-    now_dt = datetime.now(config.TZ)
-    now = now_dt.isoformat(timespec="seconds")
-
-    if action == "buyreject":
-        if not core.is_buyer(uid):
-            await query.answer("Отклонить может только закупщик.", show_alert=True)
-            return
-        if req["status"] != "потребность":
-            await query.answer("Потребность уже обработана.", show_alert=True)
-            return
-        await query.answer()
-        db.set_status(req_id, "отклонено", "processed_by", query.from_user.full_name,
-                      "processed_at", now)
-        req = db.get_by_id(req_id)
-        await core.refresh_all_cards(context.bot, req)
-        await notify(context, req["submitted_by_id"],
-                     f"✖ Потребность {req['request_no']} — отклонена закупщиком.")
-
-    elif action in ("approve", "reject"):
-        if not core.is_director(uid):
-            await query.answer("Подтверждать может только директор.", show_alert=True)
-            return
-        if req["status"] != "оформлено":
-            await query.answer("Заявка уже обработана.", show_alert=True)
-            return
-        await query.answer()
-        if action == "approve":
-            db.set_status(req_id, "одобрено", "approved_by", query.from_user.full_name, "approved_at", now)
-            req = db.get_by_id(req_id)
-            await core.refresh_all_cards(context.bot, req)
-            await core.send_accountant_card(context.bot, req)
-        else:
-            db.set_status(req_id, "отклонено", "approved_by", query.from_user.full_name, "approved_at", now)
-            req = db.get_by_id(req_id)
-            await core.refresh_all_cards(context.bot, req)
-            await notify(context, req["submitted_by_id"], f"✖ Наряд {req['naryad']} — заявка отклонена.")
-
-    elif action == "pay":
-        if not core.is_accountant(uid):
-            await query.answer("Оплатить может только бухгалтер.", show_alert=True)
-            return
-        if req["status"] != "одобрено":
-            await query.answer("Заявка ещё не одобрена или уже оплачена.", show_alert=True)
-            return
-        await query.answer("Оплачено")
-        db.set_status(req_id, "оплачено", "paid_by", query.from_user.full_name, "paid_at", now)
-        req = db.get_by_id(req_id)
-        await core.refresh_all_cards(context.bot, req)
-        await core.notify_paid(context.bot, req)
-        await core.send_driver_card(context.bot, req)
-
-    elif action == "needpay":
-        allowed = (uid == req["submitted_by_id"] or core.is_driver(uid)
-                   or core.is_director(uid) or core.is_admin(uid))
-        if not allowed:
-            await query.answer("Недоступно.", show_alert=True)
-            return
-        if req["payment_file_id"]:
-            await core.send_payment_file_to(context.bot, req, uid)
-            await query.answer("📄 Платёжка отправлена вам.")
-            return
-        already = db.get_payment_pending(req_id)
-        if uid in already:
-            await query.answer("⏳ Уже запрошено — ждём бухгалтера.", show_alert=True)
-            return
-        db.add_payment_pending(req_id, uid)
-        await query.answer("✅ Запрос отправлен бухгалтеру.", show_alert=True)
-        if already:
-            return
-        label = _requester_label(uid, req)
-        for aid in core.accountant_ids():
-            try:
-                await context.bot.send_message(
-                    aid,
-                    f"📄 По наряду {req['naryad']} нужна платёжка.\nЗапросил: {label}.",
-                    reply_markup=core.attach_kb(req_id))
-            except Exception as e:
-                log.warning("Не уведомить бухгалтера %s о запросе платёжки: %s", aid, e)
-
-    elif action == "attach":
-        if not core.is_accountant(uid):
-            await query.answer("Только бухгалтер.", show_alert=True)
-            return
-        await query.answer()
-        context.user_data["awaiting_payment_for"] = req_id
-        prompt = await context.bot.send_message(
-            uid,
-            f"Пришлите фото или PDF платёжки по наряду {req['naryad']} — "
-            f"прикреплю к заявке и отправлю тем, кто её запросил.")
-        context.user_data["payment_prompt_msg_id"] = prompt.message_id
-
-    elif action == "ship":
-        if not core.is_driver(uid) and not core.is_admin(uid):
-            await query.answer("Отметить может только водитель.", show_alert=True)
-            return
-        if req["status"] != "оплачено":
-            await query.answer("Заявка ещё не оплачена или уже в работе.", show_alert=True)
-            return
-        await query.answer()
-        db.set_status(req_id, "в_пути", "shipped_by", query.from_user.full_name, "shipped_at", now)
-        req = db.get_by_id(req_id)
-        await core.refresh_all_cards(context.bot, req)
-        await core.send_warehouse_card(context.bot, req)
-
-    elif action == "receive":
-        if not core.is_warehouse(uid) and not core.is_admin(uid):
-            await query.answer("Отметить может только склад.", show_alert=True)
-            return
-        if req["status"] != "в_пути":
-            await query.answer("Товар ещё не в пути или уже принят.", show_alert=True)
-            return
-        await query.answer()
-        db.set_status(req_id, "получено", "received_by", query.from_user.full_name, "received_at", now)
-        req = db.get_by_id(req_id)
-        await core.refresh_all_cards(context.bot, req)
-        await notify(context, req["submitted_by_id"],
-                     f"📦 Наряд {req['naryad']} — товар принят на складе.")
+    await query.answer()
+    context.user_data["reject_req_id"] = req_id
+    naryad = req.get("naryad") or req.get("request_no") or str(req_id)
+    prompt = f"✖ Отклонение заявки (наряд {naryad})\n\nУкажите причину отклонения:"
+    try:
+        await query.edit_message_caption(caption=prompt)
+    except Exception:
+        await query.edit_message_text(text=prompt)
+    return REJECT_REASON
 
 
-async def accountant_payment_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    req_id = context.user_data.get("awaiting_payment_for")
+async def reject_reason_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    req_id = context.user_data.pop("reject_req_id", None)
     if not req_id:
+        await update.message.reply_text("Нет активного отклонения.")
+        return ConversationHandler.END
+
+    reason = update.message.text.strip()
+    if len(reason) > MAX_REJECT_REASON:
+        await update.message.reply_text(f"Слишком длинная причина (макс. {MAX_REJECT_REASON} символов).")
+        context.user_data["reject_req_id"] = req_id
+        return REJECT_REASON
+    now = datetime.now(config.TZ).isoformat(timespec="seconds")
+
+    db.set_status(req_id, "отклонено", "approved_by", update.effective_user.full_name, "approved_at", now)
+    db.set_reject_reason(req_id, reason)
+    db.log_action(req_id, "отклонено", update.effective_user.id, update.effective_user.full_name, reason)
+    req = db.get_by_id(req_id)
+    await core.refresh_all_cards(context.bot, req)
+    naryad = req.get("naryad") or req.get("request_no") or str(req_id)
+    await notify(context, req["submitted_by_id"],
+                 f"✖ Наряд {naryad} — заявка отклонена.\nПричина: {reason}")
+    await core.notify_buyer_rejected(context.bot, req)
+    await update.message.reply_text(f"Заявка {naryad} отклонена.")
+    return ConversationHandler.END
+
+
+async def reject_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data.pop("reject_req_id", None)
+    await update.message.reply_text("Отклонение отменено.")
+    return ConversationHandler.END
+
+
+async def _act_resubmit(query, context, req, req_id, uid, now):
+    if not core.is_buyer(uid):
+        await query.answer("Перенаправить может только закупщик.", show_alert=True)
         return
+    if req["status"] != "отклонено":
+        await query.answer("Заявка не в статусе «отклонено».", show_alert=True)
+        return
+    await query.answer()
+    db.reset_rejected(req_id)
+    db.log_action(req_id, "перенаправлено", uid, query.from_user.full_name)
+    req = db.get_by_id(req_id)
+    cap = core.build_full_caption(req)
+    kb = core.kb_director_approve(req_id)
+    did = core.director_id()
+    if did and req.get("photo_file_id"):
+        try:
+            dm, _ = await core._send_card(context.bot, did, req["photo_file_id"], cap,
+                                          bool(req["is_document"]), reply_markup=kb)
+            db.set_director_msg(req_id, dm.message_id)
+        except Exception as e:
+            log.warning("Не удалось перенаправить карточку директору: %s", e)
+    await core.refresh_all_cards(context.bot, req)
+    try:
+        await query.edit_message_text(
+            f"🔄 Заявка {req['request_no']} перенаправлена директору на повторное рассмотрение.")
+    except Exception:
+        pass
+
+
+async def _act_pay(query, context, req, req_id, uid, now):
+    if not core.is_accountant(uid):
+        await query.answer("Оплатить может только бухгалтер.", show_alert=True)
+        return
+    if req["status"] != "одобрено":
+        await query.answer("Заявка ещё не одобрена или уже оплачена.", show_alert=True)
+        return
+    await query.answer("Оплачено")
+    db.set_status(req_id, "оплачено", "paid_by", query.from_user.full_name, "paid_at", now)
+    db.log_action(req_id, "оплачено", uid, query.from_user.full_name)
+    req = db.get_by_id(req_id)
+    await core.refresh_all_cards(context.bot, req)
+    await core.notify_paid(context.bot, req)
+    await core.send_driver_card(context.bot, req)
+
+
+async def _act_needpay(query, context, req, req_id, uid, now):
+    allowed = (uid == req["submitted_by_id"] or core.is_driver(uid)
+               or core.is_director(uid) or core.is_admin(uid))
+    if not allowed:
+        await query.answer("Недоступно.", show_alert=True)
+        return
+    if req["payment_file_id"]:
+        await core.send_payment_file_to(context.bot, req, uid)
+        await query.answer("📄 Платёжка отправлена вам.")
+        return
+    already = db.get_payment_pending(req_id)
+    if uid in already:
+        await query.answer("⏳ Уже запрошено — ждём бухгалтера.", show_alert=True)
+        return
+    db.add_payment_pending(req_id, uid)
+    await query.answer("✅ Запрос отправлен бухгалтеру.", show_alert=True)
+    if already:
+        return
+    label = _requester_label(uid, req)
+    for aid in core.accountant_ids():
+        try:
+            await context.bot.send_message(
+                aid,
+                f"📄 По наряду {req['naryad']} нужна платёжка.\nЗапросил: {label}.",
+                reply_markup=core.attach_kb(req_id))
+        except Exception as e:
+            log.warning("Не уведомить бухгалтера %s о запросе платёжки: %s", aid, e)
+
+
+async def attach_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    _, action, req_id_s = query.data.split(":")
+    req_id = int(req_id_s)
+    req = db.get_by_id(req_id)
+
+    if req is None:
+        await query.answer("Заявка не найдена.", show_alert=True)
+        return ConversationHandler.END
+    if not core.is_accountant(query.from_user.id):
+        await query.answer("Только бухгалтер.", show_alert=True)
+        return ConversationHandler.END
+
+    await query.answer()
+    context.user_data["attach_req_id"] = req_id
+    naryad = req.get("naryad") or str(req_id)
+    prompt = await context.bot.send_message(
+        query.from_user.id,
+        f"Пришлите фото или PDF платёжки по наряду {naryad} — "
+        f"прикреплю к заявке и отправлю тем, кто её запросил.\n\n"
+        f"/cancel — отмена")
+    context.user_data["payment_prompt_msg_id"] = prompt.message_id
+    return PAYMENT_FILE
+
+
+async def attach_file_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    req_id = context.user_data.pop("attach_req_id", None)
+    if not req_id:
+        await update.message.reply_text("Нет активного запроса на платёжку.")
+        return ConversationHandler.END
+
     if update.message.photo:
         file_id, is_document = update.message.photo[-1].file_id, 0
     elif update.message.document:
@@ -537,18 +753,18 @@ async def accountant_payment_received(update: Update, context: ContextTypes.DEFA
         is_document = 0 if mime.startswith("image/") else 1
     else:
         await update.message.reply_text("Пришлите фото или PDF платёжки.")
-        return
+        context.user_data["attach_req_id"] = req_id
+        return PAYMENT_FILE
 
     req = db.get_by_id(req_id)
     if req is None:
-        context.user_data.pop("awaiting_payment_for", None)
         await update.message.reply_text("Заявка не найдена.")
-        return
+        context.user_data.pop("payment_prompt_msg_id", None)
+        return ConversationHandler.END
 
     db.set_payment_file(req_id, file_id, is_document)
-    context.user_data.pop("awaiting_payment_for", None)
+    db.log_action(req_id, "платёжка", update.effective_user.id, update.effective_user.full_name)
     req = db.get_by_id(req_id)
-
     sent_to = await core.deliver_payment_to_pending(context.bot, req)
 
     who = f" — отправлена запросившим ({len(sent_to)})" if sent_to else " — сохранена (запросов пока нет)"
@@ -562,6 +778,76 @@ async def accountant_payment_received(update: Update, context: ContextTypes.DEFA
             await update.message.reply_text(text)
     else:
         await update.message.reply_text(text)
+    return ConversationHandler.END
+
+
+async def attach_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data.pop("attach_req_id", None)
+    context.user_data.pop("payment_prompt_msg_id", None)
+    await update.message.reply_text("Прикрепление платёжки отменено.")
+    return ConversationHandler.END
+
+
+async def _act_ship(query, context, req, req_id, uid, now):
+    if not core.is_driver(uid) and not core.is_admin(uid):
+        await query.answer("Отметить может только водитель.", show_alert=True)
+        return
+    if req["status"] != "оплачено":
+        await query.answer("Заявка ещё не оплачена или уже в работе.", show_alert=True)
+        return
+    await query.answer()
+    db.set_status(req_id, "в_пути", "shipped_by", query.from_user.full_name, "shipped_at", now)
+    db.log_action(req_id, "в_пути", uid, query.from_user.full_name)
+    req = db.get_by_id(req_id)
+    await core.refresh_all_cards(context.bot, req)
+    await core.send_warehouse_card(context.bot, req)
+
+
+async def _act_receive(query, context, req, req_id, uid, now):
+    if not core.is_warehouse(uid) and not core.is_admin(uid):
+        await query.answer("Отметить может только склад.", show_alert=True)
+        return
+    if req["status"] != "в_пути":
+        await query.answer("Товар ещё не в пути или уже принят.", show_alert=True)
+        return
+    await query.answer()
+    db.set_status(req_id, "получено", "received_by", query.from_user.full_name, "received_at", now)
+    db.log_action(req_id, "получено", uid, query.from_user.full_name)
+    req = db.get_by_id(req_id)
+    await core.refresh_all_cards(context.bot, req)
+    await notify(context, req["submitted_by_id"],
+                 f"📦 Наряд {req['naryad']} — товар принят на складе.")
+
+
+_ACTION_HANDLERS = {
+    "buyreject": _act_buyreject,
+    "approve": _act_approve,
+    "resubmit": _act_resubmit,
+    "pay": _act_pay,
+    "needpay": _act_needpay,
+    "ship": _act_ship,
+    "receive": _act_receive,
+}
+
+
+async def action_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    _, action, req_id_s = query.data.split(":")
+    req_id = int(req_id_s)
+    req = db.get_by_id(req_id)
+    if req is None:
+        await query.answer("Заявка не найдена.", show_alert=True)
+        return
+
+    handler = _ACTION_HANDLERS.get(action)
+    if not handler:
+        await query.answer("Неизвестное действие.", show_alert=True)
+        return
+
+    uid = query.from_user.id
+    now = datetime.now(config.TZ).isoformat(timespec="seconds")
+    await handler(query, context, req, req_id, uid, now)
+
 
 
 async def notify(context: ContextTypes.DEFAULT_TYPE, user_id: int, text: str):
@@ -623,6 +909,59 @@ async def report_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.edit_message_text("\n".join(lines))
 
 
+# ---------- Аудит-лог ----------
+
+ACTION_LABEL = {
+    "потребность": "📋 Подана потребность",
+    "оформлено": "📝 Оформлена заявка",
+    "одобрено": "🟢 Одобрено",
+    "отклонено": "✖ Отклонено",
+    "отклонено_закупщиком": "✖ Отклонено закупщиком",
+    "оплачено": "🟥 Оплачено",
+    "в_пути": "🚚 В пути",
+    "получено": "📦 Получено",
+    "перенаправлено": "🔄 Перенаправлено",
+    "адм_заявка": "📝 Адм. заявка",
+    "платёжка": "📄 Платёжка прикреплена",
+}
+
+
+async def audit_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    if not is_privileged(uid):
+        await update.message.reply_text("Команда доступна только директору, бухгалтеру или закупщику.")
+        return
+
+    args = context.args
+    if args:
+        req = db.get_by_id(int(args[0])) if args[0].isdigit() else None
+        if req is None:
+            await update.message.reply_text("Заявка не найдена. Используйте: /audit <ID заявки>")
+            return
+        rows = db.get_audit_log(req["id"])
+        if not rows:
+            await update.message.reply_text(f"По заявке {req['request_no']} действий пока нет.")
+            return
+        lines = [f"📜 История заявки {req['request_no']}", ""]
+        for r in rows:
+            label = ACTION_LABEL.get(r["action"], r["action"])
+            ts = r["ts"][5:16].replace("T", " ")
+            detail = f" — {r['detail']}" if r["detail"] else ""
+            lines.append(f"{label}\n  {r['actor_name']} · {ts}{detail}")
+        await update.message.reply_text("\n".join(lines))
+    else:
+        rows = db.recent_audit(15)
+        if not rows:
+            await update.message.reply_text("Действий пока нет.")
+            return
+        lines = ["📜 Последние действия", ""]
+        for r in rows:
+            label = ACTION_LABEL.get(r["action"], r["action"])
+            ts = r["ts"][5:16].replace("T", " ")
+            lines.append(f"{label} · #{r['request_id']} · {r['actor_name']} · {ts}")
+        await update.message.reply_text("\n".join(lines))
+
+
 # ---------- Мои заявки ----------
 
 STATUS_SHORT = {
@@ -649,6 +988,8 @@ NOT_ALLOWED_MSG = (
 
 def may_submit(user_id: int) -> bool:
     if core.is_admin(user_id) or core.is_director(user_id) or core.is_accountant(user_id):
+        return True
+    if core.is_employee(user_id) or core.is_driver(user_id) or core.is_warehouse(user_id):
         return True
     p = db.get_person(user_id)
     return bool(p is not None and p["sector"])
@@ -757,6 +1098,7 @@ async def assign_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 ROLE_LABEL = {
     config.ROLE_DIRECTOR: "👑 Директор",
+    config.ROLE_EMPLOYEE: "👷 Сотрудник",
     config.ROLE_ACCOUNTANT: "💰 Бухгалтер",
     config.ROLE_ACCOUNTANT2: "💰 Бухгалтер 2",
     config.ROLE_BUYER: "🛒 Закупщик",
@@ -842,6 +1184,11 @@ async def daily_backup(context: ContextTypes.DEFAULT_TYPE):
     if not os.path.isfile(db_path):
         return
     now = datetime.now(config.TZ)
+    today = now.strftime("%Y-%m-%d")
+    last = context.bot_data.get("last_backup_date")
+    if last == today:
+        log.info("Бэкап за %s уже отправлен — пропускаю.", today)
+        return
     size_kb = os.path.getsize(db_path) / 1024
     with closing(sqlite3.connect(db_path)) as conn:
         req_count = conn.execute("SELECT COUNT(*) FROM requests").fetchone()[0]
@@ -856,6 +1203,7 @@ async def daily_backup(context: ContextTypes.DEFAULT_TYPE):
     with open(db_path, "rb") as f:
         await context.bot.send_document(
             config.ADMIN_ID, document=f, filename=filename, caption=caption)
+    context.bot_data["last_backup_date"] = today
     log.info("Бэкап отправлен админу (%s, %.0f КБ)", filename, size_kb)
 
 
@@ -885,6 +1233,7 @@ def build_application() -> Application:
             ADM_PHOTO: [MessageHandler((filters.PHOTO | filters.Document.ALL) & ~filters.COMMAND, adm_photo_received)],
         },
         fallbacks=[CommandHandler("cancel", cancel)],
+        conversation_timeout=600,
     )
 
     # Мастер закупщика (оформление потребности → заявка)
@@ -897,25 +1246,62 @@ def build_application() -> Application:
             B_PHOTO: [MessageHandler((filters.PHOTO | filters.Document.ALL) & ~filters.COMMAND, buyer_photo)],
         },
         fallbacks=[CommandHandler("cancel", buyer_cancel)],
+        conversation_timeout=600,
+    )
+
+    # Мастер редактирования отклонённой заявки (закупщик)
+    edit_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(edit_start, pattern=r"^act:editreq:")],
+        states={
+            E_SUPPLIER: [MessageHandler(filters.TEXT & ~filters.COMMAND, edit_supplier)],
+            E_AMOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, edit_amount)],
+            E_NARYAD: [MessageHandler(filters.TEXT & ~filters.COMMAND, edit_naryad)],
+            E_PHOTO: [MessageHandler((filters.PHOTO | filters.Document.ALL) & ~filters.COMMAND, edit_photo)],
+        },
+        fallbacks=[CommandHandler("cancel", edit_cancel)],
+        conversation_timeout=600,
+    )
+
+    # Мастер отклонения заявки (директор вводит причину)
+    reject_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(reject_start, pattern=r"^act:reject:")],
+        states={
+            REJECT_REASON: [MessageHandler(filters.TEXT & ~filters.COMMAND, reject_reason_received)],
+        },
+        fallbacks=[CommandHandler("cancel", reject_cancel)],
+        conversation_timeout=600,
+    )
+
+    # Мастер прикрепления платёжки (бухгалтер)
+    attach_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(attach_start, pattern=r"^act:attach:")],
+        states={
+            PAYMENT_FILE: [
+                MessageHandler((filters.PHOTO | filters.Document.ALL) & ~filters.COMMAND, attach_file_received),
+            ],
+        },
+        fallbacks=[CommandHandler("cancel", attach_cancel)],
+        conversation_timeout=300,
     )
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("id", whoami))
     app.add_handler(employee_conv)
     app.add_handler(buyer_conv)
+    app.add_handler(edit_conv)
+    app.add_handler(reject_conv)
+    app.add_handler(attach_conv)
     app.add_handler(CommandHandler("my", my_requests))
     app.add_handler(CommandHandler("list", list_requests))
     app.add_handler(CommandHandler("assign", assign_cmd))
     app.add_handler(CommandHandler("employees", employees_cmd))
     app.add_handler(CommandHandler("report", report_menu))
+    app.add_handler(CommandHandler("audit", audit_cmd))
     app.add_handler(CallbackQueryHandler(report_callback, pattern=r"^report:"))
     app.add_handler(CallbackQueryHandler(list_callback, pattern=r"^lst:"))
     app.add_handler(CallbackQueryHandler(assign_pick_user, pattern=r"^asg:"))
     app.add_handler(CallbackQueryHandler(assign_set, pattern=r"^asgset:"))
     app.add_handler(CallbackQueryHandler(action_callback, pattern=r"^act:"))
-    app.add_handler(MessageHandler(
-        (filters.PHOTO | filters.Document.ALL) & filters.ChatType.PRIVATE & ~filters.COMMAND,
-        accountant_payment_received))
 
     return app
 

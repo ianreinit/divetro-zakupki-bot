@@ -16,6 +16,7 @@ from datetime import datetime
 from io import BytesIO
 
 from telegram import InputFile, InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
+from telegram.error import BadRequest
 
 import config
 import db
@@ -88,6 +89,14 @@ def is_warehouse(uid: int) -> bool:
     return uid in warehouse_ids()
 
 
+def employee_ids():
+    return db.get_users_by_role(config.ROLE_EMPLOYEE)
+
+
+def is_employee(uid: int) -> bool:
+    return uid in employee_ids()
+
+
 # ---------- Форматирование ----------
 
 URGENCY_LABEL = {"обычная": "", "скоро": " ⚡", "срочно": " 🔴"}
@@ -108,10 +117,12 @@ def _fmt_date(iso) -> str:
 
 
 def progress_block(req) -> str:
-    lines = [f"🔵 Подано — {_fmt_dt(req['submitted_at'])}"]
+    lines = [f"🔵 Запрос отправлен — {_fmt_dt(req['submitted_at'])}"]
     if req["status"] == "отклонено":
         at = req.get("processed_at") or req.get("approved_at")
         lines.append(f"✖ Отклонено — {_fmt_dt(at)}")
+        if req.get("reject_reason"):
+            lines.append(f"Причина: {req['reject_reason']}")
         return "\n".join(lines)
     if req.get("processed_at"):
         lines.append(f"📝 Оформлено — {_fmt_dt(req['processed_at'])}")
@@ -237,6 +248,24 @@ def kb_warehouse(req):
     return None
 
 
+def kb_director_approve(req_id):
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton("🟢 Одобрить", callback_data=f"act:approve:{req_id}"),
+        InlineKeyboardButton("✖ Отклонить", callback_data=f"act:reject:{req_id}"),
+    ]])
+
+
+def kb_buyer_rejected(req):
+    if req["status"] != "отклонено":
+        return None
+    if not req.get("naryad"):
+        return None
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("✏️ Изменить заявку", callback_data=f"act:editreq:{req['id']}")],
+        [InlineKeyboardButton("🔄 Перенаправить", callback_data=f"act:resubmit:{req['id']}")],
+    ])
+
+
 def kb_admin(req):
     if req["status"] in ("получено", "отклонено"):
         return None
@@ -258,8 +287,10 @@ async def _edit_caption(bot, chat_id, msg_id, caption, reply_markup):
     try:
         await bot.edit_message_caption(
             chat_id=chat_id, message_id=msg_id, caption=caption, reply_markup=reply_markup)
-    except Exception:
+    except BadRequest:
         pass
+    except Exception as e:
+        log.warning("edit_caption failed %s/%s: %s", chat_id, msg_id, e)
 
 
 async def _edit_text(bot, chat_id, msg_id, text, reply_markup):
@@ -268,8 +299,10 @@ async def _edit_text(bot, chat_id, msg_id, text, reply_markup):
     try:
         await bot.edit_message_text(
             chat_id=chat_id, message_id=msg_id, text=text, reply_markup=reply_markup)
-    except Exception:
+    except BadRequest:
         pass
+    except Exception as e:
+        log.warning("edit_text failed %s/%s: %s", chat_id, msg_id, e)
 
 
 async def refresh_all_cards(bot, req):
@@ -332,7 +365,8 @@ async def _send_card(bot, chat_id, media, caption, is_document, reply_markup=Non
 
 async def publish_need(bot, *, sector: str, description: str, needed_by: str,
                        urgency: str, submitter_id: int, submitter_name: str,
-                       photo_file_id: str = None, is_document: bool = False) -> str:
+                       photo_file_id: str = None, is_document: bool = False,
+                       file_bytes: bytes = None, file_name: str = None) -> str:
     prefix = config.SECTOR_PREFIX[sector]
     request_no = db.next_request_no(sector, prefix)
     now = datetime.now(config.TZ).isoformat(timespec="seconds")
@@ -345,26 +379,30 @@ async def publish_need(bot, *, sector: str, description: str, needed_by: str,
         need_photo_file_id=photo_file_id,
         need_is_document=1 if is_document else 0,
     )
+    db.log_action(request_id, "потребность", submitter_id, submitter_name)
 
     req = db.get_by_id(request_id)
     text = build_need_text(req)
 
-    # 1) Закупщику — карточка потребности с кнопкой «Оформить».
+    media = photo_file_id
+    if not media and file_bytes:
+        media = InputFile(BytesIO(file_bytes), filename=file_name or "attachment")
+
     bids = buyer_ids()
     for bid in bids:
         try:
-            if photo_file_id:
-                m, fid = await _send_card(bot, bid, photo_file_id, text,
+            if media:
+                m, fid = await _send_card(bot, bid, media, text,
                                           is_document, reply_markup=kb_buyer(req))
                 if fid and not req["need_photo_file_id"]:
                     db.set_need_photo(request_id, fid, 1 if is_document else 0)
+                    media = fid
             else:
                 m = await bot.send_message(bid, text, reply_markup=kb_buyer(req))
             db.set_buyer_msg(request_id, m.message_id)
         except Exception as e:
             log.warning("Не удалось отправить потребность закупщику %s: %s", bid, e)
 
-    # 2) Сотруднику — текстовый монитор.
     try:
         m = await bot.send_message(submitter_id, text)
         db.attach_notify_message(request_id, m.message_id)
@@ -378,13 +416,14 @@ async def publish_need(bot, *, sector: str, description: str, needed_by: str,
 
 async def process_need(bot, request_id: int, *, supplier: str, amount: float,
                        naryad: str, photo_file_id: str, is_document: bool,
-                       processed_by_name: str) -> None:
+                       processed_by_id: int = 0, processed_by_name: str) -> None:
     now = datetime.now(config.TZ).isoformat(timespec="seconds")
     db.update_need_to_request(
         request_id, supplier=supplier, amount=amount, naryad=naryad,
         photo_file_id=photo_file_id, is_document=1 if is_document else 0,
         processed_by=processed_by_name, processed_at=now,
     )
+    db.log_action(request_id, "оформлено", processed_by_id, processed_by_name)
     req = db.get_by_id(request_id)
 
     auto_approve = is_director(req["submitted_by_id"])
@@ -397,10 +436,7 @@ async def process_need(bot, request_id: int, *, supplier: str, amount: float,
         return
 
     cap = build_full_caption(req)
-    kb = InlineKeyboardMarkup([[
-        InlineKeyboardButton("🟢 Одобрить", callback_data=f"act:approve:{request_id}"),
-        InlineKeyboardButton("✖ Отклонить", callback_data=f"act:reject:{request_id}"),
-    ]])
+    kb = kb_director_approve(request_id)
     did = director_id()
     if did:
         try:
@@ -436,6 +472,7 @@ async def publish_request(bot, *, sector: str, supplier: str, amount: float,
         photo_file_id=photo_file_id, is_document=1 if is_document else 0,
         processed_by=submitter_name, processed_at=now,
     )
+    db.log_action(request_id, "адм_заявка", submitter_id, submitter_name)
 
     stored = {"file_id": photo_file_id}
 
@@ -467,10 +504,7 @@ async def publish_request(bot, *, sector: str, supplier: str, amount: float,
         return request_no
 
     full_caption = build_full_caption(db.get_by_id(request_id))
-    kb = InlineKeyboardMarkup([[
-        InlineKeyboardButton("🟢 Одобрить", callback_data=f"act:approve:{request_id}"),
-        InlineKeyboardButton("✖ Отклонить", callback_data=f"act:reject:{request_id}"),
-    ]])
+    kb = kb_director_approve(request_id)
     did = director_id()
     if did:
         try:
@@ -575,6 +609,27 @@ async def send_warehouse_card(bot, req):
             db.set_warehouse_msg(req["id"], m.message_id)
         except Exception as e:
             log.warning("Не удалось отправить карточку складу %s: %s", wid, e)
+
+
+async def notify_buyer_rejected(bot, req):
+    kb = kb_buyer_rejected(req)
+    if not kb:
+        return
+    amount_str = f"{req['amount']:,.0f}".replace(",", " ")
+    reason_line = f"\nПричина: {req['reject_reason']}" if req.get("reject_reason") else ""
+    text = (
+        f"✖ Заявка {req['request_no']} отклонена директором.\n"
+        f"Наряд: {req['naryad']}\n"
+        f"Поставщик: {req['supplier']}\n"
+        f"Сумма: {amount_str}"
+        f"{reason_line}\n\n"
+        "Вы можете изменить заявку или перенаправить её повторно."
+    )
+    for bid in buyer_ids():
+        try:
+            await bot.send_message(bid, text, reply_markup=kb)
+        except Exception as e:
+            log.warning("Не удалось уведомить закупщика об отклонении: %s", e)
 
 
 async def send_admin_card(bot, req, file_id_or_input=None):

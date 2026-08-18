@@ -60,9 +60,10 @@ ROLE_ACCOUNTANT2 = "Бухгалтер 2"
 ROLE_BUYER = "Закупщик"
 ROLE_DRIVER = "Водитель"
 ROLE_WAREHOUSE = "Склад"
+ROLE_EMPLOYEE = "Сотрудник"
 # Роли, которые может раздавать директор. «Директор» сюда НЕ входит — его назначает
 # только админ (см. ADMIN_ROLES и проверки в main.assign_*).
-ROLES = [ROLE_ACCOUNTANT, ROLE_ACCOUNTANT2, ROLE_BUYER, ROLE_DRIVER, ROLE_WAREHOUSE]
+ROLES = [ROLE_EMPLOYEE, ROLE_ACCOUNTANT, ROLE_ACCOUNTANT2, ROLE_BUYER, ROLE_DRIVER, ROLE_WAREHOUSE]
 # Полный набор ролей, доступных админу для назначения (директор + всё остальное).
 ADMIN_ROLES = ROLES + [ROLE_DIRECTOR]
 

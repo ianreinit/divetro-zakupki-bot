@@ -5,6 +5,10 @@ from datetime import datetime
 import config
 from config import DB_PATH
 
+
+def _dict_factory(cursor, row):
+    return {col[0]: row[idx] for idx, col in enumerate(cursor.description)}
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS requests (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -43,69 +47,83 @@ CREATE TABLE IF NOT EXISTS people (
 );
 """
 
+SCHEMA_AUDIT = """
+CREATE TABLE IF NOT EXISTS audit_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    request_id INTEGER NOT NULL,
+    action TEXT NOT NULL,
+    actor_id INTEGER NOT NULL,
+    actor_name TEXT NOT NULL,
+    detail TEXT,
+    ts TEXT NOT NULL
+);
+"""
+
+
+CURRENT_SCHEMA_VERSION = 1
+
+
+def _add_col(conn, table, column, col_type):
+    cols = {r[1] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+    if column not in cols:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {col_type}")
+
+
+def _migrate_to_v1(conn):
+    _add_col(conn, "people", "role", "TEXT")
+    for col, ctype in [
+        ("notify_message_id", "INTEGER"),
+        ("is_document", "INTEGER DEFAULT 0"),
+        ("director_msg_id", "INTEGER"),
+        ("accountant_msg_id", "INTEGER"),
+        ("payment_file_id", "TEXT"),
+        ("payment_is_document", "INTEGER DEFAULT 0"),
+        ("driver_msg_id", "INTEGER"),
+        ("warehouse_msg_id", "INTEGER"),
+        ("shipped_by", "TEXT"),
+        ("shipped_at", "TEXT"),
+        ("received_by", "TEXT"),
+        ("received_at", "TEXT"),
+        ("payment_pending_for", "TEXT"),
+        ("admin_msg_id", "INTEGER"),
+        ("description", "TEXT"),
+        ("needed_by", "TEXT"),
+        ("urgency", "TEXT"),
+        ("buyer_msg_id", "INTEGER"),
+        ("processed_by", "TEXT"),
+        ("processed_at", "TEXT"),
+        ("accountant2_msg_id", "INTEGER"),
+        ("need_photo_file_id", "TEXT"),
+        ("need_is_document", "INTEGER DEFAULT 0"),
+        ("reject_reason", "TEXT"),
+    ]:
+        _add_col(conn, "requests", col, ctype)
+    conn.execute("UPDATE requests SET status = 'оформлено' WHERE status = 'отправлено'")
+
+
+_MIGRATIONS = [
+    (1, _migrate_to_v1),
+]
+
 
 def init_db():
     with closing(sqlite3.connect(DB_PATH)) as conn:
         conn.execute(SCHEMA)
         conn.execute(SCHEMA_PEOPLE)
-        # Миграция для старых баз: колонка роли в реестре людей.
-        pcols = [r[1] for r in conn.execute("PRAGMA table_info(people)").fetchall()]
-        if "role" not in pcols:
-            conn.execute("ALTER TABLE people ADD COLUMN role TEXT")
-        # Миграция для старых баз: добавить колонку карточки в личке, если её нет.
-        cols = [r[1] for r in conn.execute("PRAGMA table_info(requests)").fetchall()]
-        if "notify_message_id" not in cols:
-            conn.execute("ALTER TABLE requests ADD COLUMN notify_message_id INTEGER")
-        if "is_document" not in cols:
-            conn.execute("ALTER TABLE requests ADD COLUMN is_document INTEGER DEFAULT 0")
-        if "director_msg_id" not in cols:
-            conn.execute("ALTER TABLE requests ADD COLUMN director_msg_id INTEGER")
-        # Карточка у бухгалтера (чтобы дописать итог, когда оплата завершается
-        # отдельным сообщением с платёжкой, а не нажатием кнопки) и сама платёжка.
-        if "accountant_msg_id" not in cols:
-            conn.execute("ALTER TABLE requests ADD COLUMN accountant_msg_id INTEGER")
-        if "payment_file_id" not in cols:
-            conn.execute("ALTER TABLE requests ADD COLUMN payment_file_id TEXT")
-        if "payment_is_document" not in cols:
-            conn.execute("ALTER TABLE requests ADD COLUMN payment_is_document INTEGER DEFAULT 0")
-        # Логистика: карточки у водителя и склада + кто/когда отметил этапы.
-        if "driver_msg_id" not in cols:
-            conn.execute("ALTER TABLE requests ADD COLUMN driver_msg_id INTEGER")
-        if "warehouse_msg_id" not in cols:
-            conn.execute("ALTER TABLE requests ADD COLUMN warehouse_msg_id INTEGER")
-        if "shipped_by" not in cols:
-            conn.execute("ALTER TABLE requests ADD COLUMN shipped_by TEXT")
-        if "shipped_at" not in cols:
-            conn.execute("ALTER TABLE requests ADD COLUMN shipped_at TEXT")
-        if "received_by" not in cols:
-            conn.execute("ALTER TABLE requests ADD COLUMN received_by TEXT")
-        if "received_at" not in cols:
-            conn.execute("ALTER TABLE requests ADD COLUMN received_at TEXT")
-        # Кто запросил платёжку и ждёт её (CSV из user_id). Когда платёжка
-        # прикрепляется — рассылается всем из списка, список очищается.
-        if "payment_pending_for" not in cols:
-            conn.execute("ALTER TABLE requests ADD COLUMN payment_pending_for TEXT")
-        if "admin_msg_id" not in cols:
-            conn.execute("ALTER TABLE requests ADD COLUMN admin_msg_id INTEGER")
-        if "description" not in cols:
-            conn.execute("ALTER TABLE requests ADD COLUMN description TEXT")
-        if "needed_by" not in cols:
-            conn.execute("ALTER TABLE requests ADD COLUMN needed_by TEXT")
-        if "urgency" not in cols:
-            conn.execute("ALTER TABLE requests ADD COLUMN urgency TEXT")
-        if "buyer_msg_id" not in cols:
-            conn.execute("ALTER TABLE requests ADD COLUMN buyer_msg_id INTEGER")
-        if "processed_by" not in cols:
-            conn.execute("ALTER TABLE requests ADD COLUMN processed_by TEXT")
-        if "processed_at" not in cols:
-            conn.execute("ALTER TABLE requests ADD COLUMN processed_at TEXT")
-        if "accountant2_msg_id" not in cols:
-            conn.execute("ALTER TABLE requests ADD COLUMN accountant2_msg_id INTEGER")
-        if "need_photo_file_id" not in cols:
-            conn.execute("ALTER TABLE requests ADD COLUMN need_photo_file_id TEXT")
-        if "need_is_document" not in cols:
-            conn.execute("ALTER TABLE requests ADD COLUMN need_is_document INTEGER DEFAULT 0")
-        conn.execute("UPDATE requests SET status = 'оформлено' WHERE status = 'отправлено'")
+        conn.execute(SCHEMA_AUDIT)
+
+        version = conn.execute("PRAGMA user_version").fetchone()[0]
+        for target, migrate_fn in _MIGRATIONS:
+            if version < target:
+                migrate_fn(conn)
+        if version < CURRENT_SCHEMA_VERSION:
+            conn.execute(f"PRAGMA user_version = {CURRENT_SCHEMA_VERSION}")
+
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_requests_sector ON requests(sector)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_requests_status ON requests(status)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_requests_submitted_by ON requests(submitted_by_id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_requests_submitted_at ON requests(submitted_at)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_request ON audit_log(request_id)")
         conn.commit()
 
 
@@ -166,14 +184,14 @@ def get_users_by_role(role: str):
 
 def get_person(user_id: int):
     with closing(sqlite3.connect(DB_PATH)) as conn:
-        conn.row_factory = sqlite3.Row
+        conn.row_factory = _dict_factory
         cur = conn.execute("SELECT * FROM people WHERE user_id = ?", (user_id,))
         return cur.fetchone()
 
 
 def list_people():
     with closing(sqlite3.connect(DB_PATH)) as conn:
-        conn.row_factory = sqlite3.Row
+        conn.row_factory = _dict_factory
         cur = conn.execute("SELECT * FROM people ORDER BY sector IS NULL DESC, name")
         return cur.fetchall()
 
@@ -248,7 +266,7 @@ def set_photo_file_id(request_id: int, file_id: str):
 
 def get_by_id(request_id: int):
     with closing(sqlite3.connect(DB_PATH)) as conn:
-        conn.row_factory = sqlite3.Row
+        conn.row_factory = _dict_factory
         cur = conn.execute("SELECT * FROM requests WHERE id = ?", (request_id,))
         return cur.fetchone()
 
@@ -262,53 +280,47 @@ def attach_group_message(request_id: int, chat_id: int, message_id: int):
         conn.commit()
 
 
-def set_director_msg(request_id: int, message_id: int):
+_MSG_COLUMNS = frozenset({
+    "director_msg_id", "accountant_msg_id", "accountant2_msg_id",
+    "driver_msg_id", "warehouse_msg_id", "admin_msg_id", "buyer_msg_id",
+})
+
+
+def set_msg(request_id: int, column: str, message_id: int):
+    if column not in _MSG_COLUMNS:
+        raise ValueError(f"Invalid msg column: {column}")
     with closing(sqlite3.connect(DB_PATH)) as conn:
         conn.execute(
-            "UPDATE requests SET director_msg_id = ? WHERE id = ?", (message_id, request_id))
+            f"UPDATE requests SET {column} = ? WHERE id = ?", (message_id, request_id))
         conn.commit()
+
+
+def set_director_msg(request_id: int, message_id: int):
+    set_msg(request_id, "director_msg_id", message_id)
 
 
 def set_accountant_msg(request_id: int, message_id: int):
-    with closing(sqlite3.connect(DB_PATH)) as conn:
-        conn.execute(
-            "UPDATE requests SET accountant_msg_id = ? WHERE id = ?", (message_id, request_id))
-        conn.commit()
-
-
-def set_driver_msg(request_id: int, message_id: int):
-    with closing(sqlite3.connect(DB_PATH)) as conn:
-        conn.execute(
-            "UPDATE requests SET driver_msg_id = ? WHERE id = ?", (message_id, request_id))
-        conn.commit()
-
-
-def set_warehouse_msg(request_id: int, message_id: int):
-    with closing(sqlite3.connect(DB_PATH)) as conn:
-        conn.execute(
-            "UPDATE requests SET warehouse_msg_id = ? WHERE id = ?", (message_id, request_id))
-        conn.commit()
-
-
-def set_admin_msg(request_id: int, message_id: int):
-    with closing(sqlite3.connect(DB_PATH)) as conn:
-        conn.execute(
-            "UPDATE requests SET admin_msg_id = ? WHERE id = ?", (message_id, request_id))
-        conn.commit()
-
-
-def set_buyer_msg(request_id: int, message_id: int):
-    with closing(sqlite3.connect(DB_PATH)) as conn:
-        conn.execute(
-            "UPDATE requests SET buyer_msg_id = ? WHERE id = ?", (message_id, request_id))
-        conn.commit()
+    set_msg(request_id, "accountant_msg_id", message_id)
 
 
 def set_accountant2_msg(request_id: int, message_id: int):
-    with closing(sqlite3.connect(DB_PATH)) as conn:
-        conn.execute(
-            "UPDATE requests SET accountant2_msg_id = ? WHERE id = ?", (message_id, request_id))
-        conn.commit()
+    set_msg(request_id, "accountant2_msg_id", message_id)
+
+
+def set_driver_msg(request_id: int, message_id: int):
+    set_msg(request_id, "driver_msg_id", message_id)
+
+
+def set_warehouse_msg(request_id: int, message_id: int):
+    set_msg(request_id, "warehouse_msg_id", message_id)
+
+
+def set_admin_msg(request_id: int, message_id: int):
+    set_msg(request_id, "admin_msg_id", message_id)
+
+
+def set_buyer_msg(request_id: int, message_id: int):
+    set_msg(request_id, "buyer_msg_id", message_id)
 
 
 def set_need_photo(request_id: int, file_id: str, is_document: int):
@@ -367,7 +379,7 @@ def attach_notify_message(request_id: int, message_id: int):
 
 def list_by_submitter(user_id: int, limit: int = 15):
     with closing(sqlite3.connect(DB_PATH)) as conn:
-        conn.row_factory = sqlite3.Row
+        conn.row_factory = _dict_factory
         cur = conn.execute(
             "SELECT * FROM requests WHERE submitted_by_id = ? ORDER BY submitted_at DESC LIMIT ?",
             (user_id, limit),
@@ -377,7 +389,7 @@ def list_by_submitter(user_id: int, limit: int = 15):
 
 def list_by_sector(sector: str, limit: int = 20):
     with closing(sqlite3.connect(DB_PATH)) as conn:
-        conn.row_factory = sqlite3.Row
+        conn.row_factory = _dict_factory
         cur = conn.execute(
             "SELECT * FROM requests WHERE sector = ? ORDER BY submitted_at DESC LIMIT ?",
             (sector, limit),
@@ -387,7 +399,7 @@ def list_by_sector(sector: str, limit: int = 20):
 
 def list_all_requests(limit: int = 20):
     with closing(sqlite3.connect(DB_PATH)) as conn:
-        conn.row_factory = sqlite3.Row
+        conn.row_factory = _dict_factory
         cur = conn.execute(
             "SELECT * FROM requests ORDER BY submitted_at DESC LIMIT ?", (limit,))
         return cur.fetchall()
@@ -395,7 +407,7 @@ def list_all_requests(limit: int = 20):
 
 def find_by_message(chat_id: int, message_id: int):
     with closing(sqlite3.connect(DB_PATH)) as conn:
-        conn.row_factory = sqlite3.Row
+        conn.row_factory = _dict_factory
         cur = conn.execute(
             "SELECT * FROM requests WHERE group_chat_id = ? AND group_message_id = ?",
             (chat_id, message_id),
@@ -403,10 +415,17 @@ def find_by_message(chat_id: int, message_id: int):
         return cur.fetchone()
 
 
+_STATUS_FIELDS = frozenset({
+    "approved_by", "approved_at", "paid_by", "paid_at",
+    "shipped_by", "shipped_at", "received_by", "received_at",
+    "processed_by", "processed_at",
+})
+
+
 def set_status(request_id: int, status: str, actor_field: str, actor_name: str,
                time_field: str, when: str):
-    # actor_field/time_field приходят из кода бота (не от пользователя), не из ввода —
-    # поэтому подстановка имени колонки здесь безопасна.
+    if actor_field not in _STATUS_FIELDS or time_field not in _STATUS_FIELDS:
+        raise ValueError(f"Invalid field name: {actor_field}/{time_field}")
     with closing(sqlite3.connect(DB_PATH)) as conn:
         conn.execute(
             f"UPDATE requests SET status = ?, {actor_field} = ?, {time_field} = ? WHERE id = ?",
@@ -415,9 +434,54 @@ def set_status(request_id: int, status: str, actor_field: str, actor_name: str,
         conn.commit()
 
 
+def reset_rejected(request_id: int):
+    with closing(sqlite3.connect(DB_PATH)) as conn:
+        conn.execute(
+            """UPDATE requests SET status = 'оформлено', approved_by = NULL, approved_at = NULL,
+               director_msg_id = NULL, reject_reason = NULL
+               WHERE id = ? AND status = 'отклонено'""",
+            (request_id,))
+        conn.commit()
+
+
+def set_reject_reason(request_id: int, reason: str):
+    with closing(sqlite3.connect(DB_PATH)) as conn:
+        conn.execute(
+            "UPDATE requests SET reject_reason = ? WHERE id = ?",
+            (reason, request_id))
+        conn.commit()
+
+
+def log_action(request_id: int, action: str, actor_id: int, actor_name: str,
+               detail: str = None):
+    ts = datetime.now(config.TZ).isoformat(timespec="seconds")
+    with closing(sqlite3.connect(DB_PATH)) as conn:
+        conn.execute(
+            "INSERT INTO audit_log (request_id, action, actor_id, actor_name, detail, ts) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (request_id, action, actor_id, actor_name, detail, ts))
+        conn.commit()
+
+
+def get_audit_log(request_id: int):
+    with closing(sqlite3.connect(DB_PATH)) as conn:
+        conn.row_factory = _dict_factory
+        cur = conn.execute(
+            "SELECT * FROM audit_log WHERE request_id = ? ORDER BY ts", (request_id,))
+        return cur.fetchall()
+
+
+def recent_audit(limit: int = 20):
+    with closing(sqlite3.connect(DB_PATH)) as conn:
+        conn.row_factory = _dict_factory
+        cur = conn.execute(
+            "SELECT * FROM audit_log ORDER BY ts DESC LIMIT ?", (limit,))
+        return cur.fetchall()
+
+
 def report(sector, period_start: str):
     with closing(sqlite3.connect(DB_PATH)) as conn:
-        conn.row_factory = sqlite3.Row
+        conn.row_factory = _dict_factory
         if sector and sector != "Все":
             cur = conn.execute(
                 "SELECT * FROM requests WHERE sector = ? AND submitted_at >= ? ORDER BY submitted_at DESC",

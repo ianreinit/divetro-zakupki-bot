@@ -14,6 +14,8 @@ import hmac
 import json
 import logging
 import os
+import time
+from datetime import datetime
 from io import BytesIO
 from urllib.parse import parse_qsl
 
@@ -33,7 +35,41 @@ PAY_HTML = os.path.join(HERE, "webapp", "pay.html")
 MAX_FILE_BYTES = 15 * 1024 * 1024
 
 
-def verify_init_data(init_data: str, bot_token: str):
+class FileTooLarge(Exception):
+    pass
+
+
+async def parse_multipart(request):
+    try:
+        reader = await request.multipart()
+    except Exception:
+        return None, None, None, None
+
+    fields = {}
+    file_bytes = None
+    file_name = None
+    file_ctype = None
+
+    async for part in reader:
+        if part.name == "file":
+            file_name = part.filename or "attachment"
+            file_ctype = (part.headers.get("Content-Type") or "").lower()
+            buf = bytearray()
+            while True:
+                chunk = await part.read_chunk()
+                if not chunk:
+                    break
+                buf.extend(chunk)
+                if len(buf) > MAX_FILE_BYTES:
+                    raise FileTooLarge
+            file_bytes = bytes(buf)
+        else:
+            fields[part.name] = (await part.text()).strip()
+
+    return fields, file_bytes, file_name, file_ctype
+
+
+def verify_init_data(init_data: str, bot_token: str, max_age: int = 86400):
     if not init_data:
         return None
     try:
@@ -42,6 +78,9 @@ def verify_init_data(init_data: str, bot_token: str):
         return None
     received_hash = pairs.pop("hash", None)
     if not received_hash:
+        return None
+    auth_date = int(pairs.get("auth_date", "0"))
+    if auth_date and time.time() - auth_date > max_age:
         return None
     data_check_string = "\n".join(f"{k}={v}" for k, v in sorted(pairs.items()))
     secret_key = hmac.new(b"WebAppData", bot_token.encode(), hashlib.sha256).digest()
@@ -71,6 +110,10 @@ async def handle_mysector(request: web.Request) -> web.Response:
         return web.json_response({"sector": "", "locked": False})
     p = db.get_person(uid)
     sector = p["sector"] if p and p["sector"] else ""
+    if not sector and len(config.SECTORS) == 1:
+        if (core.is_employee(uid) or core.is_driver(uid) or core.is_warehouse(uid)
+                or core.is_director(uid) or core.is_accountant(uid) or core.is_admin(uid)):
+            sector = config.SECTORS[0]
     admin_sector = config.ADMIN_SECTOR if core.is_director(uid) else ""
     return web.json_response(
         {"sector": sector, "locked": bool(sector), "admin_sector": admin_sector})
@@ -79,31 +122,11 @@ async def handle_mysector(request: web.Request) -> web.Response:
 async def handle_submit(request: web.Request) -> web.Response:
     bot = request.app["bot"]
     try:
-        reader = await request.multipart()
-    except Exception:
+        fields, file_bytes, file_name, file_ctype = await parse_multipart(request)
+    except FileTooLarge:
+        return web.json_response({"ok": False, "error": "file_too_big"}, status=413)
+    if fields is None:
         return web.json_response({"ok": False, "error": "bad_request"}, status=400)
-
-    fields = {}
-    file_bytes = None
-    file_name = None
-    file_ctype = None
-
-    async for part in reader:
-        if part.name == "file":
-            file_name = part.filename or "attachment"
-            file_ctype = (part.headers.get("Content-Type") or "").lower()
-            buf = bytearray()
-            while True:
-                chunk = await part.read_chunk()
-                if not chunk:
-                    break
-                buf.extend(chunk)
-                if len(buf) > MAX_FILE_BYTES:
-                    return web.json_response(
-                        {"ok": False, "error": "file_too_big"}, status=413)
-            file_bytes = bytes(buf)
-        else:
-            fields[part.name] = (await part.text()).strip()
 
     # 1) Проверяем подпись
     init = verify_init_data(fields.get("initData", ""), config.BOT_TOKEN)
@@ -124,7 +147,9 @@ async def handle_submit(request: web.Request) -> web.Response:
     assigned = person["sector"] if person is not None else None
     privileged = (core.is_director(submitter_id) or core.is_accountant(submitter_id)
                   or core.is_admin(submitter_id))
-    if not privileged and not assigned:
+    has_role = (core.is_employee(submitter_id) or core.is_driver(submitter_id)
+                or core.is_warehouse(submitter_id))
+    if not privileged and not has_role and not assigned:
         return web.json_response({"ok": False, "error": "not_allowed"}, status=403)
 
     # 3) Поля потребности
@@ -141,86 +166,26 @@ async def handle_submit(request: web.Request) -> web.Response:
 
     if not description:
         return web.json_response({"ok": False, "error": "no_description"}, status=400)
+    if len(description) > 500:
+        return web.json_response({"ok": False, "error": "description_too_long"}, status=400)
     if not needed_by:
         return web.json_response({"ok": False, "error": "bad_date"}, status=400)
 
-    # 4) Фото (необязательно) — если есть, отправляем через Telegram для получения file_id
-    photo_file_id = None
     is_document = False
     if file_bytes:
         is_document = "pdf" in (file_ctype or "") or (file_name or "").lower().endswith(".pdf")
-        media = InputFile(BytesIO(file_bytes), filename=file_name or "attachment")
-        try:
-            # Отправляем файл боту (самому себе) чтобы получить file_id,
-            # или передаём байты напрямую в publish_need (он отправит закупщику).
-            pass
-        except Exception:
-            pass
 
-    # 5) Публикуем потребность
     try:
-        if file_bytes:
-            from io import BytesIO as _BytesIO
-            request_no = await _publish_need_with_bytes(
-                bot, sector=sector, description=description, needed_by=needed_by,
-                urgency=urgency, submitter_id=submitter_id, submitter_name=submitter_name,
-                file_bytes=file_bytes, file_name=file_name, is_document=is_document,
-            )
-        else:
-            request_no = await core.publish_need(
-                bot, sector=sector, description=description, needed_by=needed_by,
-                urgency=urgency, submitter_id=submitter_id, submitter_name=submitter_name,
-            )
+        request_no = await core.publish_need(
+            bot, sector=sector, description=description, needed_by=needed_by,
+            urgency=urgency, submitter_id=submitter_id, submitter_name=submitter_name,
+            file_bytes=file_bytes, file_name=file_name, is_document=is_document,
+        )
     except Exception as e:
         log.exception("Не удалось опубликовать потребность из формы: %s", e)
         return web.json_response({"ok": False, "error": "publish_failed"}, status=500)
 
     return web.json_response({"ok": True, "request_no": request_no})
-
-
-async def _publish_need_with_bytes(bot, *, sector, description, needed_by, urgency,
-                                    submitter_id, submitter_name,
-                                    file_bytes, file_name, is_document):
-    """Публикует потребность с файлом из веб-формы (байты → file_id через отправку)."""
-    prefix = config.SECTOR_PREFIX[sector]
-    from datetime import datetime
-    request_no = db.next_request_no(sector, prefix)
-    now = datetime.now(config.TZ).isoformat(timespec="seconds")
-
-    request_id = db.create_need(
-        request_no=request_no, sector=sector,
-        submitted_by_id=submitter_id, submitted_by_name=submitter_name,
-        submitted_at=now, description=description,
-        needed_by=needed_by, urgency=urgency,
-    )
-
-    req = db.get_by_id(request_id)
-    text = core.build_need_text(req)
-    media = InputFile(BytesIO(file_bytes), filename=file_name or "attachment")
-
-    # Отправляем закупщику с файлом
-    bids = core.buyer_ids()
-    stored_fid = None
-    for bid in bids:
-        try:
-            m, fid = await core._send_card(bot, bid, media, text,
-                                           is_document, reply_markup=core.kb_buyer(req))
-            if fid and not stored_fid:
-                stored_fid = fid
-                db.set_need_photo(request_id, fid, 1 if is_document else 0)
-            db.set_buyer_msg(request_id, m.message_id)
-            media = stored_fid or InputFile(BytesIO(file_bytes), filename=file_name or "attachment")
-        except Exception as e:
-            log.warning("Не удалось отправить потребность закупщику %s: %s", bid, e)
-
-    # Сотруднику — текстовый монитор
-    try:
-        m = await bot.send_message(submitter_id, text)
-        db.attach_notify_message(request_id, m.message_id)
-    except Exception:
-        pass
-
-    return request_no
 
 
 async def handle_pay(request: web.Request) -> web.Response:
@@ -230,31 +195,11 @@ async def handle_pay(request: web.Request) -> web.Response:
 async def handle_attach_payment(request: web.Request) -> web.Response:
     bot = request.app["bot"]
     try:
-        reader = await request.multipart()
-    except Exception:
+        fields, file_bytes, file_name, file_ctype = await parse_multipart(request)
+    except FileTooLarge:
+        return web.json_response({"ok": False, "error": "file_too_big"}, status=413)
+    if fields is None:
         return web.json_response({"ok": False, "error": "bad_request"}, status=400)
-
-    fields = {}
-    file_bytes = None
-    file_name = None
-    file_ctype = None
-
-    async for part in reader:
-        if part.name == "file":
-            file_name = part.filename or "payment"
-            file_ctype = (part.headers.get("Content-Type") or "").lower()
-            buf = bytearray()
-            while True:
-                chunk = await part.read_chunk()
-                if not chunk:
-                    break
-                buf.extend(chunk)
-                if len(buf) > MAX_FILE_BYTES:
-                    return web.json_response(
-                        {"ok": False, "error": "file_too_big"}, status=413)
-            file_bytes = bytes(buf)
-        else:
-            fields[part.name] = (await part.text()).strip()
 
     init = verify_init_data(fields.get("initData", ""), config.BOT_TOKEN)
     if init is None:
@@ -289,6 +234,9 @@ async def handle_attach_payment(request: web.Request) -> web.Response:
         return web.json_response({"ok": False, "error": "publish_failed"}, status=500)
 
     db.set_payment_file(req_id, file_id, 1 if is_document else 0)
+    user = json.loads(init.get("user", "{}"))
+    actor_name = " ".join(p for p in [user.get("first_name"), user.get("last_name")] if p) or str(uid)
+    db.log_action(req_id, "платёжка", uid, actor_name)
     req = db.get_by_id(req_id)
     await core.deliver_payment_to_pending(bot, req)
     return web.json_response({"ok": True})
