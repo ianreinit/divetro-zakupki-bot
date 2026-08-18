@@ -308,14 +308,21 @@ async def _edit_text(bot, chat_id, msg_id, text, reply_markup):
 async def refresh_all_cards(bot, req):
     text = build_need_text(req)
     npkb = kb_needpay_or_none(req)
+    has_need_photo = bool(req.get("need_photo_file_id"))
 
-    # Текстовые карточки (потребности, монитор сотрудника)
-    await _edit_text(bot, req["submitted_by_id"], req["notify_message_id"], text, npkb)
+    # Карточка сотрудника (фото или текст)
+    if has_need_photo and req.get("notify_message_id"):
+        await _edit_caption(bot, req["submitted_by_id"], req["notify_message_id"], text, npkb)
+    else:
+        await _edit_text(bot, req["submitted_by_id"], req["notify_message_id"], text, npkb)
 
-    # Карточка закупщика (текстовая)
+    # Карточка закупщика (фото или текст)
     for bid in buyer_ids():
         if req.get("buyer_msg_id"):
-            await _edit_text(bot, bid, req["buyer_msg_id"], text, kb_buyer(req))
+            if has_need_photo:
+                await _edit_caption(bot, bid, req["buyer_msg_id"], text, kb_buyer(req))
+            else:
+                await _edit_text(bot, bid, req["buyer_msg_id"], text, kb_buyer(req))
 
     # Фото-карточки (существуют только после оформления закупщиком)
     if req.get("photo_file_id"):
@@ -340,8 +347,8 @@ async def refresh_all_cards(bot, req):
                 await _edit_caption(bot, wh[0], req["warehouse_msg_id"], cap, kb_warehouse(req))
 
     if req.get("admin_msg_id") and config.ADMIN_ID:
-        if req.get("photo_file_id"):
-            cap = build_full_caption(req)
+        if req.get("photo_file_id") or has_need_photo:
+            cap = build_full_caption(req) if req.get("photo_file_id") else text
             await _edit_caption(bot, config.ADMIN_ID, req["admin_msg_id"], cap, kb_admin(req))
         else:
             await _edit_text(bot, config.ADMIN_ID, req["admin_msg_id"], text, kb_admin(req))
@@ -391,15 +398,19 @@ async def publish_need(bot, *, sector: str, description: str, needed_by: str,
     if not media and file_bytes:
         media = InputFile(BytesIO(file_bytes), filename=file_name or "attachment")
 
+    def _remember_fid(fid):
+        nonlocal media
+        if fid and not db.get_by_id(request_id)["need_photo_file_id"]:
+            db.set_need_photo(request_id, fid, 1 if is_document else 0)
+            media = fid
+
     bids = buyer_ids()
     for bid in bids:
         try:
             if media:
                 m, fid = await _send_card(bot, bid, media, text,
                                           is_document, reply_markup=kb_buyer(req))
-                if fid and not req["need_photo_file_id"]:
-                    db.set_need_photo(request_id, fid, 1 if is_document else 0)
-                    media = fid
+                _remember_fid(fid)
             else:
                 m = await bot.send_message(bid, text, reply_markup=kb_buyer(req))
             db.set_buyer_msg(request_id, m.message_id)
@@ -407,14 +418,22 @@ async def publish_need(bot, *, sector: str, description: str, needed_by: str,
             log.warning("Не удалось отправить потребность закупщику %s: %s", bid, e)
 
     try:
-        m = await bot.send_message(submitter_id, text)
+        if media:
+            m, fid = await _send_card(bot, submitter_id, media, text, is_document)
+            _remember_fid(fid)
+        else:
+            m = await bot.send_message(submitter_id, text)
         db.attach_notify_message(request_id, m.message_id)
     except Exception:
         pass
 
     if config.ADMIN_ID and submitter_id != config.ADMIN_ID:
         try:
-            m = await bot.send_message(config.ADMIN_ID, text)
+            if media:
+                m, fid = await _send_card(bot, config.ADMIN_ID, media, text, is_document)
+                _remember_fid(fid)
+            else:
+                m = await bot.send_message(config.ADMIN_ID, text)
             db.set_admin_msg(request_id, m.message_id)
         except Exception:
             pass
