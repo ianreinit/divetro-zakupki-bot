@@ -340,8 +340,11 @@ async def refresh_all_cards(bot, req):
                 await _edit_caption(bot, wh[0], req["warehouse_msg_id"], cap, kb_warehouse(req))
 
     if req.get("admin_msg_id") and config.ADMIN_ID:
-        cap = build_full_caption(req) if req.get("photo_file_id") else text
-        await _edit_caption(bot, config.ADMIN_ID, req["admin_msg_id"], cap, kb_admin(req))
+        if req.get("photo_file_id"):
+            cap = build_full_caption(req)
+            await _edit_caption(bot, config.ADMIN_ID, req["admin_msg_id"], cap, kb_admin(req))
+        else:
+            await _edit_text(bot, config.ADMIN_ID, req["admin_msg_id"], text, kb_admin(req))
 
 
 async def _send_card(bot, chat_id, media, caption, is_document, reply_markup=None,
@@ -408,6 +411,13 @@ async def publish_need(bot, *, sector: str, description: str, needed_by: str,
         db.attach_notify_message(request_id, m.message_id)
     except Exception:
         pass
+
+    if config.ADMIN_ID and submitter_id != config.ADMIN_ID:
+        try:
+            m = await bot.send_message(config.ADMIN_ID, text)
+            db.set_admin_msg(request_id, m.message_id)
+        except Exception:
+            pass
 
     return request_no
 
