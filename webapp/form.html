@@ -77,6 +77,9 @@
   <label for="sector">Сектор</label>
   <select id="sector"></select>
 
+  <label for="order_no">Сток / Номер заказа</label>
+  <input id="order_no" type="text" placeholder="Например: СТ-1234 или ЗАК-567">
+
   <label for="description">Что нужно</label>
   <textarea id="description" placeholder="Например: Метизы М10, 200 шт, оцинкованные" rows="3"></textarea>
 
@@ -175,15 +178,18 @@
 
   submitBtn.addEventListener("click", async () => {
     clearError();
+    const order_no = $("order_no").value.trim();
     const description = $("description").value.trim();
     const needed_by = $("needed_by").value;
 
+    if (!order_no) return showError("Укажите сток или номер заказа.");
     if (!description) return showError("Опишите, что вам нужно.");
     if (!needed_by) return showError("Укажите дату.");
 
     const fd = new FormData();
     fd.append("initData", tg ? tg.initData : "");
     fd.append("sector", $("sector").value);
+    fd.append("order_no", order_no);
     fd.append("description", description);
     fd.append("needed_by", needed_by);
     fd.append("urgency", selectedUrgency);
@@ -214,6 +220,7 @@
       no_user: "Не удалось определить отправителя. Откройте форму через кнопку в боте.",
       not_allowed: "Вы не закреплены за сектором. Обратитесь к директору, чтобы он вас добавил.",
       bad_sector: "Выберите сектор из списка.",
+      no_order_no: "Укажите сток или номер заказа.",
       empty_fields: "Опишите, что вам нужно.",
       no_description: "Опишите, что вам нужно.",
       bad_date: "Укажите дату.",

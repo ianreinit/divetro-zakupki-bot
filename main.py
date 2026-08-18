@@ -24,17 +24,17 @@ logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("zakupki-bot")
 
 # Состояния мастера сотрудника (потребность)
-SECTOR, DESCRIPTION, NEEDED_BY, URGENCY, NEED_PHOTO = range(5)
+SECTOR, ORDER_NO, DESCRIPTION, NEEDED_BY, URGENCY, NEED_PHOTO = range(6)
 # Состояния мастера сотрудника (админ-заявка директора — полный набор полей)
-ADM_SUPPLIER, ADM_AMOUNT, ADM_NARYAD, ADM_PHOTO = range(5, 9)
+ADM_SUPPLIER, ADM_AMOUNT, ADM_NARYAD, ADM_PHOTO = range(6, 10)
 # Состояния мастера закупщика (оформление потребности в заявку)
 B_SUPPLIER, B_AMOUNT, B_NARYAD, B_PHOTO = range(4)
 # Состояния мастера редактирования отклонённой заявки (закупщик)
-E_SUPPLIER, E_AMOUNT, E_NARYAD, E_PHOTO = range(9, 13)
+E_SUPPLIER, E_AMOUNT, E_NARYAD, E_PHOTO = range(10, 14)
 # Состояние ожидания причины отклонения (директор)
-REJECT_REASON = 13
+REJECT_REASON = 14
 # Состояние ожидания файла платёжки (бухгалтер)
-PAYMENT_FILE = 14
+PAYMENT_FILE = 15
 
 
 # ---------- /start ----------
@@ -136,8 +136,8 @@ async def sector_chosen(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return ADM_SUPPLIER
 
     # Обычная потребность — упрощённый путь.
-    await query.edit_message_text(f"Сектор: {sector}\n\nЧто нужно? (опишите)")
-    return DESCRIPTION
+    await query.edit_message_text(f"Сектор: {sector}\n\nВведите сток или номер заказа:")
+    return ORDER_NO
 
 
 # --- Упрощённый путь: потребность ---
@@ -146,6 +146,22 @@ MAX_DESCRIPTION = 500
 MAX_SUPPLIER = 200
 MAX_NARYAD = 100
 MAX_REJECT_REASON = 300
+
+
+MAX_ORDER_NO = 100
+
+
+async def order_no_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text.strip()
+    if not text:
+        await update.message.reply_text("Укажите сток или номер заказа.")
+        return ORDER_NO
+    if len(text) > MAX_ORDER_NO:
+        await update.message.reply_text(f"Слишком длинный номер (макс. {MAX_ORDER_NO} символов).")
+        return ORDER_NO
+    context.user_data["order_no"] = text
+    await update.message.reply_text("Что нужно? (опишите)")
+    return DESCRIPTION
 
 
 async def description_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -218,6 +234,7 @@ async def need_photo_received(update: Update, context: ContextTypes.DEFAULT_TYPE
         urgency=data["urgency"],
         submitter_id=update.effective_user.id,
         submitter_name=update.effective_user.full_name,
+        order_no=data.get("order_no", ""),
         photo_file_id=file_id,
         is_document=is_doc,
     )
@@ -237,6 +254,7 @@ async def need_skip_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         urgency=data["urgency"],
         submitter_id=query.from_user.id,
         submitter_name=query.from_user.full_name,
+        order_no=data.get("order_no", ""),
     )
     await query.edit_message_text("Потребность отправлена закупщику.")
     context.user_data.clear()
@@ -336,8 +354,9 @@ async def buyer_start_process(update: Update, context: ContextTypes.DEFAULT_TYPE
     context.user_data["buyer_data"] = {}
 
     desc = req.get("description") or "—"
+    no = core._display_no(req)
     await query.edit_message_text(
-        f"Оформление потребности {req['request_no']}\n"
+        f"Оформление потребности {no}\n"
         f"Что нужно: {desc}\n\n"
         f"Введите поставщика:")
     return B_SUPPLIER
@@ -405,7 +424,7 @@ async def buyer_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     req = db.get_by_id(req_id)
     await update.message.reply_text(
-        f"Заявка {req['request_no']} оформлена и отправлена на одобрение директору.")
+        f"Заявка {core._display_no(req)} оформлена и отправлена на одобрение директору.")
     context.user_data.pop("buyer_req_id", None)
     context.user_data.pop("buyer_data", None)
     return ConversationHandler.END
@@ -441,8 +460,9 @@ async def edit_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["edit_data"] = {}
 
     amount_str = f"{req['amount']:,.0f}".replace(",", " ")
+    no = core._display_no(req)
     await query.edit_message_text(
-        f"Редактирование заявки {req['request_no']}\n"
+        f"Редактирование заявки {no}\n"
         f"Текущий поставщик: {req['supplier']}\n"
         f"Текущая сумма: {amount_str}\n"
         f"Текущий наряд: {req['naryad']}\n\n"
@@ -524,7 +544,7 @@ async def edit_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await core.refresh_all_cards(context.bot, req)
     await update.message.reply_text(
-        f"Заявка {req['request_no']} изменена и отправлена директору на повторное рассмотрение.")
+        f"Заявка {core._display_no(req)} изменена и отправлена директору на повторное рассмотрение.")
     context.user_data.pop("edit_req_id", None)
     context.user_data.pop("edit_data", None)
     return ConversationHandler.END
@@ -563,7 +583,7 @@ async def _act_buyreject(query, context, req, req_id, uid, now):
     req = db.get_by_id(req_id)
     await core.refresh_all_cards(context.bot, req)
     await notify(context, req["submitted_by_id"],
-                 f"✖ Потребность {req['request_no']} — отклонена закупщиком.")
+                 f"✖ Потребность {core._display_no(req)} — отклонена закупщиком.")
 
 
 async def _act_approve(query, context, req, req_id, uid, now):
@@ -599,8 +619,8 @@ async def reject_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await query.answer()
     context.user_data["reject_req_id"] = req_id
-    naryad = req.get("naryad") or req.get("request_no") or str(req_id)
-    prompt = f"✖ Отклонение заявки (наряд {naryad})\n\nУкажите причину отклонения:"
+    no = core._display_no(req)
+    prompt = f"✖ Отклонение заявки ({no})\n\nУкажите причину отклонения:"
     try:
         await query.edit_message_caption(caption=prompt)
     except Exception:
@@ -626,11 +646,11 @@ async def reject_reason_received(update: Update, context: ContextTypes.DEFAULT_T
     db.log_action(req_id, "отклонено", update.effective_user.id, update.effective_user.full_name, reason)
     req = db.get_by_id(req_id)
     await core.refresh_all_cards(context.bot, req)
-    naryad = req.get("naryad") or req.get("request_no") or str(req_id)
+    no = core._display_no(req)
     await notify(context, req["submitted_by_id"],
-                 f"✖ Наряд {naryad} — заявка отклонена.\nПричина: {reason}")
+                 f"✖ {no} — заявка отклонена.\nПричина: {reason}")
     await core.notify_buyer_rejected(context.bot, req)
-    await update.message.reply_text(f"Заявка {naryad} отклонена.")
+    await update.message.reply_text(f"Заявка {no} отклонена.")
     return ConversationHandler.END
 
 
@@ -664,7 +684,7 @@ async def _act_resubmit(query, context, req, req_id, uid, now):
     await core.refresh_all_cards(context.bot, req)
     try:
         await query.edit_message_text(
-            f"🔄 Заявка {req['request_no']} перенаправлена директору на повторное рассмотрение.")
+            f"🔄 Заявка {core._display_no(req)} перенаправлена директору на повторное рассмотрение.")
     except Exception:
         pass
 
@@ -708,7 +728,7 @@ async def _act_needpay(query, context, req, req_id, uid, now):
         try:
             await context.bot.send_message(
                 aid,
-                f"📄 По наряду {req['naryad']} нужна платёжка.\nЗапросил: {label}.",
+                f"📄 По {core._display_no(req)} нужна платёжка.\nЗапросил: {label}.",
                 reply_markup=core.attach_kb(req_id))
         except Exception as e:
             log.warning("Не уведомить бухгалтера %s о запросе платёжки: %s", aid, e)
@@ -729,10 +749,10 @@ async def attach_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await query.answer()
     context.user_data["attach_req_id"] = req_id
-    naryad = req.get("naryad") or str(req_id)
+    no = core._display_no(req)
     prompt = await context.bot.send_message(
         query.from_user.id,
-        f"Пришлите фото или PDF платёжки по наряду {naryad} — "
+        f"Пришлите фото или PDF платёжки по {no} — "
         f"прикреплю к заявке и отправлю тем, кто её запросил.\n\n"
         f"/cancel — отмена")
     context.user_data["payment_prompt_msg_id"] = prompt.message_id
@@ -769,7 +789,7 @@ async def attach_file_received(update: Update, context: ContextTypes.DEFAULT_TYP
 
     who = f" — отправлена запросившим ({len(sent_to)})" if sent_to else " — сохранена (запросов пока нет)"
     prompt_id = context.user_data.pop("payment_prompt_msg_id", None)
-    text = f"✅ Платёжка по наряду {req['naryad']} прикреплена{who}."
+    text = f"✅ Платёжка по {core._display_no(req)} прикреплена{who}."
     if prompt_id:
         try:
             await context.bot.edit_message_text(
@@ -816,7 +836,7 @@ async def _act_receive(query, context, req, req_id, uid, now):
     req = db.get_by_id(req_id)
     await core.refresh_all_cards(context.bot, req)
     await notify(context, req["submitted_by_id"],
-                 f"📦 Наряд {req['naryad']} — товар принят на складе.")
+                 f"📦 {core._display_no(req)} — товар принят на складе.")
 
 
 _ACTION_HANDLERS = {
@@ -900,8 +920,8 @@ async def report_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         amount_str = f"{r['amount']:,.0f}".replace(",", " ") if r["amount"] > 0 else "—"
         mark = STATUS_MARK.get(r["status"], "•")
         supplier = r["supplier"] or "—"
-        naryad = r["naryad"] or (r.get("description") or "—")[:20]
-        lines.append(f"{mark} {naryad} · {supplier} · {amount_str}")
+        label = r.get("order_no") or r.get("naryad") or (r.get("description") or "—")[:20]
+        lines.append(f"{mark} {label} · {supplier} · {amount_str}")
 
     if not rows:
         lines.append("Заявок за этот месяц пока нет.")
@@ -940,9 +960,9 @@ async def audit_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         rows = db.get_audit_log(req["id"])
         if not rows:
-            await update.message.reply_text(f"По заявке {req['request_no']} действий пока нет.")
+            await update.message.reply_text(f"По заявке {core._display_no(req)} действий пока нет.")
             return
-        lines = [f"📜 История заявки {req['request_no']}", ""]
+        lines = [f"📜 История заявки {core._display_no(req)}", ""]
         for r in rows:
             label = ACTION_LABEL.get(r["action"], r["action"])
             ts = r["ts"][5:16].replace("T", " ")
@@ -1017,7 +1037,7 @@ def format_requests(rows, title: str, show_sector: bool = False) -> str:
         mark = STATUS_MARK.get(r["status"], "•")
         short = STATUS_SHORT.get(r["status"], r["status"])
         sec = f"[{r['sector']}] " if show_sector else ""
-        label = r["naryad"] or (r.get("description") or "—")[:25]
+        label = r.get("order_no") or r.get("naryad") or (r.get("description") or "—")[:25]
         lines.append(f"{mark} {sec}{label} · {amount_str} — {short}")
     return "\n".join(lines)
 
@@ -1220,6 +1240,7 @@ def build_application() -> Application:
         ],
         states={
             SECTOR: [CallbackQueryHandler(sector_chosen, pattern=r"^sector:")],
+            ORDER_NO: [MessageHandler(filters.TEXT & ~filters.COMMAND, order_no_received)],
             DESCRIPTION: [MessageHandler(filters.TEXT & ~filters.COMMAND, description_received)],
             NEEDED_BY: [MessageHandler(filters.TEXT & ~filters.COMMAND, needed_by_received)],
             URGENCY: [CallbackQueryHandler(urgency_chosen, pattern=r"^urgency:")],

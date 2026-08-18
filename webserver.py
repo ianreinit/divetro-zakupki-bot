@@ -153,6 +153,7 @@ async def handle_submit(request: web.Request) -> web.Response:
         return web.json_response({"ok": False, "error": "not_allowed"}, status=403)
 
     # 3) Поля потребности
+    order_no = fields.get("order_no", "").strip()
     description = fields.get("description", "")
     needed_by = fields.get("needed_by", "")
     urgency = fields.get("urgency", "обычная")
@@ -164,6 +165,8 @@ async def handle_submit(request: web.Request) -> web.Response:
         if sector not in config.SECTORS:
             return web.json_response({"ok": False, "error": "bad_sector"}, status=400)
 
+    if not order_no:
+        return web.json_response({"ok": False, "error": "no_order_no"}, status=400)
     if not description:
         return web.json_response({"ok": False, "error": "no_description"}, status=400)
     if len(description) > 500:
@@ -179,6 +182,7 @@ async def handle_submit(request: web.Request) -> web.Response:
         request_no = await core.publish_need(
             bot, sector=sector, description=description, needed_by=needed_by,
             urgency=urgency, submitter_id=submitter_id, submitter_name=submitter_name,
+            order_no=order_no,
             file_bytes=file_bytes, file_name=file_name, is_document=is_document,
         )
     except Exception as e:
@@ -226,7 +230,7 @@ async def handle_attach_payment(request: web.Request) -> web.Response:
     is_document = "pdf" in file_ctype or (file_name or "").lower().endswith(".pdf")
 
     try:
-        caption = f"✅ Платёжка по наряду {req['naryad']} прикреплена."
+        caption = f"✅ Платёжка по {core._display_no(req)} прикреплена."
         media = InputFile(BytesIO(file_bytes), filename=file_name or "payment")
         _, file_id = await core._send_card(bot, uid, media, caption, is_document)
     except Exception as e:

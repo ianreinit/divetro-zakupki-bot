@@ -137,13 +137,20 @@ def progress_block(req) -> str:
     return "\n".join(lines)
 
 
+def _display_no(req) -> str:
+    return req.get("order_no") or req["request_no"]
+
+
 def build_need_text(req) -> str:
+    no = _display_no(req)
     lines = []
     if req["status"] == "потребность":
-        lines.append(f"📋 Потребность {req['request_no']}")
+        lines.append(f"📋 Потребность {no}")
     else:
-        lines.append(f"📋 Заявка {req['request_no']}")
+        lines.append(f"📋 Заявка {no}")
     lines.append(f"Сектор: {req['sector']}")
+    if req.get("order_no"):
+        lines.append(f"Заказ/Сток: {req['order_no']}")
     if req.get("description"):
         lines.append(f"Что нужно: {req['description']}")
     if req.get("needed_by"):
@@ -158,33 +165,32 @@ def build_need_text(req) -> str:
     lines.append(f"От: {req['submitted_by_name']}")
     if req.get("processed_by"):
         lines.append(f"Оформил: {req['processed_by']}")
-    lines.append(f"№ {req['request_no']}")
     lines.append("")
     lines.append(progress_block(req))
     return "\n".join(lines)
 
 
-def build_caption(request_no, sector, supplier, amount, naryad, submitter_name) -> str:
-    amount_str = f"{amount:,.0f}".replace(",", " ")
-    return (
-        f"🧾 Наряд {naryad}\n"
-        f"Сектор: {sector}\n"
-        f"Поставщик: {supplier}\n"
-        f"Сумма: {amount_str}\n"
-        f"От: {submitter_name}\n"
-        f"№ {request_no}"
-    )
-
-
 def build_full_caption(req) -> str:
-    base = build_caption(req["request_no"], req["sector"], req["supplier"],
-                         req["amount"], req["naryad"], req["submitted_by_name"])
-    extra = ""
+    no = _display_no(req)
+    amount_str = f"{req['amount']:,.0f}".replace(",", " ") if req.get("amount") and req["amount"] > 0 else "—"
+    lines = [f"🧾 {no}"]
+    lines.append(f"Сектор: {req['sector']}")
+    if req.get("order_no"):
+        lines.append(f"Заказ/Сток: {req['order_no']}")
+    if req.get("supplier"):
+        lines.append(f"Поставщик: {req['supplier']}")
+    if req["amount"] and req["amount"] > 0:
+        lines.append(f"Сумма: {amount_str}")
+    if req.get("naryad"):
+        lines.append(f"Наряд: {req['naryad']}")
     if req.get("description"):
-        extra += f"\nЧто нужно: {req['description']}"
+        lines.append(f"Что нужно: {req['description']}")
+    lines.append(f"От: {req['submitted_by_name']}")
     if req.get("processed_by"):
-        extra += f"\nОформил: {req['processed_by']}"
-    return base + extra + "\n\n" + progress_block(req)
+        lines.append(f"Оформил: {req['processed_by']}")
+    lines.append("")
+    lines.append(progress_block(req))
+    return "\n".join(lines)
 
 
 # ---------- Кнопки платёжки ----------
@@ -375,9 +381,10 @@ async def _send_card(bot, chat_id, media, caption, is_document, reply_markup=Non
 
 async def publish_need(bot, *, sector: str, description: str, needed_by: str,
                        urgency: str, submitter_id: int, submitter_name: str,
+                       order_no: str = "",
                        photo_file_id: str = None, is_document: bool = False,
                        file_bytes: bytes = None, file_name: str = None) -> str:
-    prefix = config.SECTOR_PREFIX[sector]
+    prefix = config.SECTOR_PREFIX.get(sector, "REQ")
     request_no = db.next_request_no(sector, prefix)
     now = datetime.now(config.TZ).isoformat(timespec="seconds")
 
@@ -388,6 +395,7 @@ async def publish_need(bot, *, sector: str, description: str, needed_by: str,
         needed_by=needed_by, urgency=urgency,
         need_photo_file_id=photo_file_id,
         need_is_document=1 if is_document else 0,
+        order_no=order_no or None,
     )
     db.log_action(request_id, "потребность", submitter_id, submitter_name)
 
@@ -578,7 +586,8 @@ async def send_accountant_card(bot, req):
 
 
 async def notify_paid(bot, req):
-    text = f"🧾 Наряд {req['naryad']} — оплачено, можно ехать за материалом."
+    no = _display_no(req)
+    text = f"🧾 {no} — оплачено, можно ехать за материалом."
     try:
         await bot.send_message(req["submitted_by_id"], text)
     except Exception as e:
@@ -588,7 +597,8 @@ async def notify_paid(bot, req):
 async def send_payment_file_to(bot, req, chat_id: int):
     if not req["payment_file_id"]:
         return False
-    caption = f"🧾 Наряд {req['naryad']} — платёжка по закупке."
+    no = _display_no(req)
+    caption = f"🧾 {no} — платёжка по закупке."
     try:
         await _send_card(bot, chat_id, req["payment_file_id"], caption,
                          bool(req["payment_is_document"]))
@@ -646,8 +656,9 @@ async def notify_buyer_rejected(bot, req):
         return
     amount_str = f"{req['amount']:,.0f}".replace(",", " ")
     reason_line = f"\nПричина: {req['reject_reason']}" if req.get("reject_reason") else ""
+    no = _display_no(req)
     text = (
-        f"✖ Заявка {req['request_no']} отклонена директором.\n"
+        f"✖ Заявка {no} отклонена директором.\n"
         f"Наряд: {req['naryad']}\n"
         f"Поставщик: {req['supplier']}\n"
         f"Сумма: {amount_str}"

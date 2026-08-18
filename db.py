@@ -60,7 +60,7 @@ CREATE TABLE IF NOT EXISTS audit_log (
 """
 
 
-CURRENT_SCHEMA_VERSION = 1
+CURRENT_SCHEMA_VERSION = 2
 
 
 def _add_col(conn, table, column, col_type):
@@ -101,8 +101,13 @@ def _migrate_to_v1(conn):
     conn.execute("UPDATE requests SET status = 'оформлено' WHERE status = 'отправлено'")
 
 
+def _migrate_to_v2(conn):
+    _add_col(conn, "requests", "order_no", "TEXT")
+
+
 _MIGRATIONS = [
     (1, _migrate_to_v1),
+    (2, _migrate_to_v2),
 ]
 
 
@@ -226,15 +231,18 @@ def create_request(**kwargs) -> int:
 def create_need(**kwargs) -> int:
     kwargs.setdefault("need_photo_file_id", None)
     kwargs.setdefault("need_is_document", 0)
+    kwargs.setdefault("order_no", None)
     with closing(sqlite3.connect(DB_PATH)) as conn:
         cur = conn.execute(
             """INSERT INTO requests
                (request_no, sector, supplier, amount, naryad,
                 submitted_by_id, submitted_by_name, submitted_at, status,
-                description, needed_by, urgency, need_photo_file_id, need_is_document)
+                description, needed_by, urgency, need_photo_file_id, need_is_document,
+                order_no)
                VALUES (:request_no, :sector, '', 0, '',
                        :submitted_by_id, :submitted_by_name, :submitted_at, 'потребность',
-                       :description, :needed_by, :urgency, :need_photo_file_id, :need_is_document)""",
+                       :description, :needed_by, :urgency, :need_photo_file_id, :need_is_document,
+                       :order_no)""",
             kwargs,
         )
         conn.commit()
