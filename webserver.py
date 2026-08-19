@@ -167,6 +167,8 @@ async def handle_submit(request: web.Request) -> web.Response:
 
     if not order_no:
         return web.json_response({"ok": False, "error": "no_order_no"}, status=400)
+    if len(order_no) > 100:
+        return web.json_response({"ok": False, "error": "order_no_too_long"}, status=400)
     if not description:
         return web.json_response({"ok": False, "error": "no_description"}, status=400)
     if len(description) > 500:

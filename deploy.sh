@@ -14,7 +14,7 @@ if [ -x venv/bin/python ]; then
   venv/bin/python -m py_compile main.py core.py webserver.py db.py config.py
 fi
 
-git add -A
+git add -u
 git commit -m "$MSG" || echo "→ нечего коммитить (изменений нет)"
 git push origin main
 

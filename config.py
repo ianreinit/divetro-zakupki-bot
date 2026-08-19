@@ -27,6 +27,7 @@ DIRECTOR_ID = _int_env("DIRECTOR_ID")
 ACCOUNTANT_ID = _int_env("ACCOUNTANT_ID")
 ACCOUNTANT2_ID = _int_env("ACCOUNTANT2_ID")
 BUYER_ID = _int_env("BUYER_ID")
+BUYER2_ID = _int_env("BUYER2_ID")
 # Логистика (общая на все секторы). Оба — личные чаты с тем же ботом.
 # Пусто/0 — этап логистики выключен (цикл заканчивается на «оплачено»).
 DRIVER_ID = _int_env("DRIVER_ID")        # водитель: кнопка «🚚 Еду за товаром»
@@ -58,12 +59,13 @@ ROLE_DIRECTOR = "Директор"    # назначается ТОЛЬКО ад
 ROLE_ACCOUNTANT = "Бухгалтер"
 ROLE_ACCOUNTANT2 = "Бухгалтер 2"
 ROLE_BUYER = "Закупщик"
+ROLE_BUYER2 = "Закупщик 2"
 ROLE_DRIVER = "Водитель"
 ROLE_WAREHOUSE = "Склад"
 ROLE_EMPLOYEE = "Сотрудник"
 # Роли, которые может раздавать директор. «Директор» сюда НЕ входит — его назначает
 # только админ (см. ADMIN_ROLES и проверки в main.assign_*).
-ROLES = [ROLE_EMPLOYEE, ROLE_ACCOUNTANT, ROLE_ACCOUNTANT2, ROLE_BUYER, ROLE_DRIVER, ROLE_WAREHOUSE]
+ROLES = [ROLE_EMPLOYEE, ROLE_ACCOUNTANT, ROLE_ACCOUNTANT2, ROLE_BUYER, ROLE_BUYER2, ROLE_DRIVER, ROLE_WAREHOUSE]
 # Полный набор ролей, доступных админу для назначения (директор + всё остальное).
 ADMIN_ROLES = ROLES + [ROLE_DIRECTOR]
 

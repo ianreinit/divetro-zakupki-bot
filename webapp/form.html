@@ -74,14 +74,13 @@
 <body>
   <h1>Новая потребность</h1>
 
-  <label for="sector">Сектор</label>
-  <select id="sector"></select>
+  <input id="sector" type="hidden" value="Закупки">
 
   <label for="order_no">Сток / Номер заказа</label>
-  <input id="order_no" type="text" placeholder="Например: СТ-1234 или ЗАК-567">
+  <input id="order_no" type="text" placeholder="Например: СТ-1234 или ЗАК-567" maxlength="100">
 
   <label for="description">Что нужно</label>
-  <textarea id="description" placeholder="Например: Метизы М10, 200 шт, оцинкованные" rows="3"></textarea>
+  <textarea id="description" placeholder="Например: Метизы М10, 200 шт, оцинкованные" rows="3" maxlength="500"></textarea>
 
   <label for="needed_by">Нужно к дате</label>
   <input id="needed_by" type="date">
@@ -131,36 +130,7 @@
   const d = new Date(); d.setDate(d.getDate() + 7);
   $("needed_by").value = d.toISOString().split("T")[0];
 
-  // Секторы из бэкенда
-  fetch("config").then(r => r.json()).then(cfg => {
-    const sel = $("sector");
-    (cfg.sectors || []).forEach(s => {
-      const opt = document.createElement("option");
-      opt.value = s; opt.textContent = s; sel.appendChild(opt);
-    });
-    return fetchMySector();
-  }).catch(() => showError("Не удалось загрузить список секторов."));
-
-  function fetchMySector() {
-    const fd = new FormData();
-    fd.append("initData", tg ? tg.initData : "");
-    return fetch("mysector", { method: "POST", body: fd })
-      .then(r => r.json())
-      .then(info => {
-        if (!info) return;
-        const sel = $("sector");
-        if (!info.sector) return;
-        sel.value = info.sector;
-        if (info.locked) {
-          sel.disabled = true;
-          const note = document.createElement("div");
-          note.className = "hint-line";
-          note.textContent = "Ваш сектор: " + info.sector + " (закреплён)";
-          sel.parentNode.insertBefore(note, sel.nextSibling);
-        }
-      })
-      .catch(() => {});
-  }
+  // Сектор зафиксирован
 
   // Превью файла
   $("file").addEventListener("change", (e) => {
@@ -219,10 +189,11 @@
       auth_failed: "Не удалось подтвердить, что потребность отправляете вы. Откройте форму через кнопку в боте.",
       no_user: "Не удалось определить отправителя. Откройте форму через кнопку в боте.",
       not_allowed: "Вы не закреплены за сектором. Обратитесь к директору, чтобы он вас добавил.",
-      bad_sector: "Выберите сектор из списка.",
       no_order_no: "Укажите сток или номер заказа.",
+      order_no_too_long: "Номер заказа слишком длинный (макс. 100 символов).",
       empty_fields: "Опишите, что вам нужно.",
       no_description: "Опишите, что вам нужно.",
+      description_too_long: "Описание слишком длинное (макс. 500 символов).",
       bad_date: "Укажите дату.",
       file_too_big: "Файл слишком большой (максимум 15 МБ).",
       publish_failed: "Не получилось отправить потребность. Попробуйте ещё раз.",

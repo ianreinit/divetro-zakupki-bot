@@ -60,7 +60,7 @@ CREATE TABLE IF NOT EXISTS audit_log (
 """
 
 
-CURRENT_SCHEMA_VERSION = 2
+CURRENT_SCHEMA_VERSION = 3
 
 
 def _add_col(conn, table, column, col_type):
@@ -105,9 +105,14 @@ def _migrate_to_v2(conn):
     _add_col(conn, "requests", "order_no", "TEXT")
 
 
+def _migrate_to_v3(conn):
+    _add_col(conn, "requests", "buyer2_msg_id", "INTEGER")
+
+
 _MIGRATIONS = [
     (1, _migrate_to_v1),
     (2, _migrate_to_v2),
+    (3, _migrate_to_v3),
 ]
 
 
@@ -290,7 +295,8 @@ def attach_group_message(request_id: int, chat_id: int, message_id: int):
 
 _MSG_COLUMNS = frozenset({
     "director_msg_id", "accountant_msg_id", "accountant2_msg_id",
-    "driver_msg_id", "warehouse_msg_id", "admin_msg_id", "buyer_msg_id",
+    "driver_msg_id", "warehouse_msg_id", "admin_msg_id",
+    "buyer_msg_id", "buyer2_msg_id",
 })
 
 
@@ -329,6 +335,10 @@ def set_admin_msg(request_id: int, message_id: int):
 
 def set_buyer_msg(request_id: int, message_id: int):
     set_msg(request_id, "buyer_msg_id", message_id)
+
+
+def set_buyer2_msg(request_id: int, message_id: int):
+    set_msg(request_id, "buyer2_msg_id", message_id)
 
 
 def set_need_photo(request_id: int, file_id: str, is_document: int):

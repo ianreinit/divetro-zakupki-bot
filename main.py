@@ -24,17 +24,17 @@ logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("zakupki-bot")
 
 # Состояния мастера сотрудника (потребность)
-SECTOR, ORDER_NO, DESCRIPTION, NEEDED_BY, URGENCY, NEED_PHOTO = range(6)
+ORDER_NO, DESCRIPTION, NEEDED_BY, URGENCY, NEED_PHOTO = range(5)
 # Состояния мастера сотрудника (админ-заявка директора — полный набор полей)
-ADM_SUPPLIER, ADM_AMOUNT, ADM_NARYAD, ADM_PHOTO = range(6, 10)
+ADM_SUPPLIER, ADM_AMOUNT, ADM_NARYAD, ADM_PHOTO = range(5, 9)
 # Состояния мастера закупщика (оформление потребности в заявку)
 B_SUPPLIER, B_AMOUNT, B_NARYAD, B_PHOTO = range(4)
 # Состояния мастера редактирования отклонённой заявки (закупщик)
-E_SUPPLIER, E_AMOUNT, E_NARYAD, E_PHOTO = range(10, 14)
+E_SUPPLIER, E_AMOUNT, E_NARYAD, E_PHOTO = range(9, 13)
 # Состояние ожидания причины отклонения (директор)
-REJECT_REASON = 14
+REJECT_REASON = 13
 # Состояние ожидания файла платёжки (бухгалтер)
-PAYMENT_FILE = 15
+PAYMENT_FILE = 14
 
 
 # ---------- /start ----------
@@ -98,12 +98,18 @@ async def new_wizard(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not may_submit(update.effective_user.id):
         await update.message.reply_text(NOT_ALLOWED_MSG)
         return ConversationHandler.END
-    sectors = list(config.SECTORS)
+
     if core.is_director(update.effective_user.id):
-        sectors.append(config.ADMIN_SECTOR)
-    keyboard = [[InlineKeyboardButton(s, callback_data=f"sector:{s}")] for s in sectors]
-    await update.message.reply_text("Выберите сектор:", reply_markup=InlineKeyboardMarkup(keyboard))
-    return SECTOR
+        keyboard = [
+            [InlineKeyboardButton("📋 Потребность (закупка)", callback_data="wiz:need")],
+            [InlineKeyboardButton("📝 Административный платёж", callback_data="wiz:adm")],
+        ]
+        await update.message.reply_text("Что подаёте?", reply_markup=InlineKeyboardMarkup(keyboard))
+        return ORDER_NO
+
+    context.user_data["sector"] = config.SECTORS[0]
+    await update.message.reply_text("Введите сток или номер заказа:")
+    return ORDER_NO
 
 
 async def new_request(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -121,22 +127,21 @@ async def new_request(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return await new_wizard(update, context)
 
 
-async def sector_chosen(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def wiz_type_chosen(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    sector = query.data.split(":", 1)[1]
-    if sector == config.ADMIN_SECTOR and not core.is_director(query.from_user.id):
-        await query.edit_message_text("Эта категория доступна только директору.")
-        return ConversationHandler.END
-    context.user_data["sector"] = sector
+    choice = query.data.split(":", 1)[1]
 
-    # Административные — полная заявка (директор знает поставщика и сумму).
-    if sector == config.ADMIN_SECTOR:
-        await query.edit_message_text(f"Сектор: {sector}\n\nПоставщик?")
+    if choice == "adm":
+        if not core.is_director(query.from_user.id):
+            await query.edit_message_text("Эта категория доступна только директору.")
+            return ConversationHandler.END
+        context.user_data["sector"] = config.ADMIN_SECTOR
+        await query.edit_message_text("Административный платёж\n\nПоставщик?")
         return ADM_SUPPLIER
 
-    # Обычная потребность — упрощённый путь.
-    await query.edit_message_text(f"Сектор: {sector}\n\nВведите сток или номер заказа:")
+    context.user_data["sector"] = config.SECTORS[0]
+    await query.edit_message_text("Введите сток или номер заказа:")
     return ORDER_NO
 
 
@@ -1122,6 +1127,7 @@ ROLE_LABEL = {
     config.ROLE_ACCOUNTANT: "💰 Бухгалтер",
     config.ROLE_ACCOUNTANT2: "💰 Бухгалтер 2",
     config.ROLE_BUYER: "🛒 Закупщик",
+    config.ROLE_BUYER2: "🛒 Закупщик 2",
     config.ROLE_DRIVER: "🚚 Водитель",
     config.ROLE_WAREHOUSE: "📦 Склад",
 }
@@ -1239,8 +1245,10 @@ def build_application() -> Application:
             CommandHandler("new_text", new_wizard),
         ],
         states={
-            SECTOR: [CallbackQueryHandler(sector_chosen, pattern=r"^sector:")],
-            ORDER_NO: [MessageHandler(filters.TEXT & ~filters.COMMAND, order_no_received)],
+            ORDER_NO: [
+                CallbackQueryHandler(wiz_type_chosen, pattern=r"^wiz:"),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, order_no_received),
+            ],
             DESCRIPTION: [MessageHandler(filters.TEXT & ~filters.COMMAND, description_received)],
             NEEDED_BY: [MessageHandler(filters.TEXT & ~filters.COMMAND, needed_by_received)],
             URGENCY: [CallbackQueryHandler(urgency_chosen, pattern=r"^urgency:")],

@@ -42,7 +42,16 @@ def accountant_ids():
 
 def buyer_ids():
     ids = db.get_users_by_role(config.ROLE_BUYER)
-    return ids if ids else ([config.BUYER_ID] if config.BUYER_ID else [])
+    ids2 = db.get_users_by_role(config.ROLE_BUYER2)
+    result = ids + ids2
+    if not result:
+        fallback = []
+        if config.BUYER_ID:
+            fallback.append(config.BUYER_ID)
+        if config.BUYER2_ID:
+            fallback.append(config.BUYER2_ID)
+        return fallback
+    return result
 
 
 def driver_ids():
@@ -148,9 +157,6 @@ def build_need_text(req) -> str:
         lines.append(f"📋 Потребность {no}")
     else:
         lines.append(f"📋 Заявка {no}")
-    lines.append(f"Сектор: {req['sector']}")
-    if req.get("order_no"):
-        lines.append(f"Заказ/Сток: {req['order_no']}")
     if req.get("description"):
         lines.append(f"Что нужно: {req['description']}")
     if req.get("needed_by"):
@@ -174,9 +180,6 @@ def build_full_caption(req) -> str:
     no = _display_no(req)
     amount_str = f"{req['amount']:,.0f}".replace(",", " ") if req.get("amount") and req["amount"] > 0 else "—"
     lines = [f"🧾 {no}"]
-    lines.append(f"Сектор: {req['sector']}")
-    if req.get("order_no"):
-        lines.append(f"Заказ/Сток: {req['order_no']}")
     if req.get("supplier"):
         lines.append(f"Поставщик: {req['supplier']}")
     if req["amount"] and req["amount"] > 0:
@@ -287,12 +290,22 @@ def kb_admin(req):
 
 # ---------- Отправка / редактирование ----------
 
+MAX_CAPTION = 1024
+
+
+def _trim_caption(text: str) -> str:
+    if len(text) <= MAX_CAPTION:
+        return text
+    return text[:MAX_CAPTION - 1] + "…"
+
+
 async def _edit_caption(bot, chat_id, msg_id, caption, reply_markup):
     if not chat_id or not msg_id:
         return
     try:
         await bot.edit_message_caption(
-            chat_id=chat_id, message_id=msg_id, caption=caption, reply_markup=reply_markup)
+            chat_id=chat_id, message_id=msg_id, caption=_trim_caption(caption),
+            reply_markup=reply_markup)
     except BadRequest:
         pass
     except Exception as e:
@@ -322,13 +335,17 @@ async def refresh_all_cards(bot, req):
     else:
         await _edit_text(bot, req["submitted_by_id"], req["notify_message_id"], text, npkb)
 
-    # Карточка закупщика (фото или текст)
-    for bid in buyer_ids():
-        if req.get("buyer_msg_id"):
+    # Карточки закупщиков (фото или текст)
+    bids = buyer_ids()
+    buyer_msg_cols = ["buyer_msg_id", "buyer2_msg_id"]
+    for i, bid in enumerate(bids):
+        col = buyer_msg_cols[i] if i < len(buyer_msg_cols) else None
+        msg_id = req.get(col) if col else None
+        if msg_id:
             if has_need_photo:
-                await _edit_caption(bot, bid, req["buyer_msg_id"], text, kb_buyer(req))
+                await _edit_caption(bot, bid, msg_id, text, kb_buyer(req))
             else:
-                await _edit_text(bot, bid, req["buyer_msg_id"], text, kb_buyer(req))
+                await _edit_text(bot, bid, msg_id, text, kb_buyer(req))
 
     # Фото-карточки (существуют только после оформления закупщиком)
     if req.get("photo_file_id"):
@@ -362,6 +379,7 @@ async def refresh_all_cards(bot, req):
 
 async def _send_card(bot, chat_id, media, caption, is_document, reply_markup=None,
                      reply_to_message_id=None):
+    caption = _trim_caption(caption)
     extra = {}
     if reply_to_message_id:
         extra = {"reply_to_message_id": reply_to_message_id,
@@ -413,7 +431,7 @@ async def publish_need(bot, *, sector: str, description: str, needed_by: str,
             media = fid
 
     bids = buyer_ids()
-    for bid in bids:
+    for i, bid in enumerate(bids):
         try:
             if media:
                 m, fid = await _send_card(bot, bid, media, text,
@@ -421,7 +439,10 @@ async def publish_need(bot, *, sector: str, description: str, needed_by: str,
                 _remember_fid(fid)
             else:
                 m = await bot.send_message(bid, text, reply_markup=kb_buyer(req))
-            db.set_buyer_msg(request_id, m.message_id)
+            if i == 0:
+                db.set_buyer_msg(request_id, m.message_id)
+            else:
+                db.set_buyer2_msg(request_id, m.message_id)
         except Exception as e:
             log.warning("Не удалось отправить потребность закупщику %s: %s", bid, e)
 
