@@ -360,18 +360,15 @@ async def buyer_start_process(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     desc = req.get("description") or "—"
     no = core._display_no(req)
-    prompt = (
-        f"Оформление потребности {no}\n"
+    try:
+        await query.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup([]))
+    except Exception:
+        pass
+    await context.bot.send_message(
+        query.from_user.id,
+        f"📝 Оформление потребности {no}\n"
         f"Что нужно: {desc}\n\n"
         f"Введите поставщика:")
-    empty_kb = InlineKeyboardMarkup([])
-    try:
-        await query.edit_message_caption(caption=prompt, reply_markup=empty_kb)
-    except Exception:
-        try:
-            await query.edit_message_text(text=prompt, reply_markup=empty_kb)
-        except Exception:
-            await context.bot.send_message(query.from_user.id, prompt)
     return B_SUPPLIER
 
 
