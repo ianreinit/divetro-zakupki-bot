@@ -205,12 +205,6 @@ def needpay_kb(req_id):
 
 
 def attach_kb(req_id):
-    if config.PAYAPP_URL:
-        return InlineKeyboardMarkup([[
-            InlineKeyboardButton(
-                "📎 Прикрепить платёжку",
-                web_app=WebAppInfo(f"{config.PAYAPP_URL}?req={req_id}"))
-        ]])
     return InlineKeyboardMarkup([[
         InlineKeyboardButton("📎 Прикрепить платёжку", callback_data=f"act:attach:{req_id}")
     ]])
