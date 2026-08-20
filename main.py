@@ -51,12 +51,13 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         sector_line = f"Ваш сектор: {person['sector']}\n" if (person and person["sector"]) else ""
         role_line = f"Ваша роль: {role}\n" if (role and not person.get("sector")) else ""
         kb = None
-        if config.WEBAPP_URL:
+        if config.WEBAPP_URL and not core.is_buyer(user.id):
             kb = InlineKeyboardMarkup([[InlineKeyboardButton(
                 "📋 Подать потребность", web_app=WebAppInfo(config.WEBAPP_URL))]])
+        new_hint = "потребность или заявка" if core.is_buyer(user.id) else "подать потребность"
         await update.message.reply_text(
             f"Привет, {user.first_name}! Я бот закупок.\n{sector_line}{role_line}\n"
-            "📋 /new — подать потребность\n"
+            f"📋 /new — {new_hint}\n"
             "📋 /list — заявки\n"
             "📋 /my — мои заявки",
             reply_markup=kb,
@@ -107,6 +108,14 @@ async def new_wizard(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Что подаёте?", reply_markup=InlineKeyboardMarkup(keyboard))
         return ORDER_NO
 
+    if core.is_buyer(update.effective_user.id):
+        keyboard = [
+            [InlineKeyboardButton("📋 Потребность", callback_data="wiz:need")],
+            [InlineKeyboardButton("📝 Новая заявка", callback_data="wiz:buyreq")],
+        ]
+        await update.message.reply_text("Что подаёте?", reply_markup=InlineKeyboardMarkup(keyboard))
+        return ORDER_NO
+
     context.user_data["sector"] = config.SECTORS[0]
     await update.message.reply_text("Введите сток или номер заказа:")
     return ORDER_NO
@@ -117,6 +126,21 @@ async def new_request(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not may_submit(update.effective_user.id):
         await update.message.reply_text(NOT_ALLOWED_MSG)
         return ConversationHandler.END
+
+    if core.is_buyer(update.effective_user.id):
+        buttons = []
+        if config.WEBAPP_URL:
+            buttons.append([InlineKeyboardButton(
+                "📋 Потребность", web_app=WebAppInfo(config.WEBAPP_URL))])
+        else:
+            buttons.append([InlineKeyboardButton(
+                "📋 Потребность", callback_data="wiz:need")])
+        buttons.append([InlineKeyboardButton(
+            "📝 Новая заявка", callback_data="wiz:buyreq")])
+        await update.message.reply_text(
+            "Что подаёте?", reply_markup=InlineKeyboardMarkup(buttons))
+        return ORDER_NO
+
     if config.WEBAPP_URL:
         kb = InlineKeyboardMarkup([[
             InlineKeyboardButton("📋 Подать потребность", web_app=WebAppInfo(config.WEBAPP_URL))
@@ -138,6 +162,14 @@ async def wiz_type_chosen(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return ConversationHandler.END
         context.user_data["sector"] = config.ADMIN_SECTOR
         await query.edit_message_text("Административный платёж\n\nПоставщик?")
+        return ADM_SUPPLIER
+
+    if choice == "buyreq":
+        if not core.is_buyer(query.from_user.id):
+            await query.edit_message_text("Эта функция доступна только закупщику.")
+            return ConversationHandler.END
+        context.user_data["sector"] = config.SECTORS[0]
+        await query.edit_message_text("📝 Новая заявка\n\nПоставщик?")
         return ADM_SUPPLIER
 
     context.user_data["sector"] = config.SECTORS[0]
@@ -395,6 +427,8 @@ async def buyer_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def buyer_naryad(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message or not update.message.text:
+        return B_NARYAD
     text = update.message.text.strip()
     if len(text) > MAX_NARYAD:
         await update.message.reply_text(f"Слишком длинный наряд (макс. {MAX_NARYAD} символов).")
