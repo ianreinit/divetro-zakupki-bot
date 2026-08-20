@@ -150,6 +150,20 @@ async def new_request(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Что подаёте?", reply_markup=InlineKeyboardMarkup(buttons))
         return ORDER_NO
 
+    if core.is_director(update.effective_user.id):
+        buttons = []
+        if config.WEBAPP_URL:
+            buttons.append([InlineKeyboardButton(
+                "📋 Потребность (закупка)", web_app=WebAppInfo(config.WEBAPP_URL))])
+        else:
+            buttons.append([InlineKeyboardButton(
+                "📋 Потребность (закупка)", callback_data="wiz:need")])
+        buttons.append([InlineKeyboardButton(
+            "📝 Административный платёж", callback_data="wiz:adm")])
+        await update.message.reply_text(
+            "Что подаёте?", reply_markup=InlineKeyboardMarkup(buttons))
+        return ORDER_NO
+
     if config.WEBAPP_URL:
         kb = InlineKeyboardMarkup([[
             InlineKeyboardButton("📋 Подать потребность", web_app=WebAppInfo(config.WEBAPP_URL))
