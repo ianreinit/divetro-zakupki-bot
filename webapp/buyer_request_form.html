@@ -1,0 +1,160 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>Новая заявка</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<style>
+  :root {
+    --bg: var(--tg-theme-bg-color, #ffffff);
+    --text: var(--tg-theme-text-color, #1c1c1e);
+    --hint: var(--tg-theme-hint-color, #8e8e93);
+    --section-bg: var(--tg-theme-secondary-bg-color, #f2f2f7);
+    --accent: var(--tg-theme-button-color, #2ea6ff);
+    --accent-text: var(--tg-theme-button-text-color, #ffffff);
+    --field-bg: var(--tg-theme-bg-color, #ffffff);
+    --border: rgba(128,128,128,.28);
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 16px;
+    font: 16px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background: var(--section-bg); color: var(--text);
+    -webkit-tap-highlight-color: transparent;
+  }
+  h1 { font-size: 20px; margin: 4px 0 16px; }
+  label { display: block; font-size: 13px; color: var(--hint); margin: 14px 0 6px; }
+  input, textarea {
+    width: 100%; padding: 12px 14px; font-size: 16px;
+    color: var(--text); background: var(--field-bg);
+    border: 1px solid var(--border); border-radius: 12px; outline: none;
+    appearance: none; -webkit-appearance: none;
+    font-family: inherit;
+  }
+  textarea { resize: none; min-height: 60px; line-height: 1.4; }
+  input:focus, textarea:focus { border-color: var(--accent); }
+  .file-btn {
+    display: flex; align-items: center; gap: 10px;
+    padding: 14px; border: 1px dashed var(--border); border-radius: 12px;
+    background: var(--field-bg); color: var(--hint); cursor: pointer;
+  }
+  .file-btn.filled { color: var(--text); border-style: solid; border-color: var(--accent); }
+  .file-btn svg { flex: none; }
+  #file { display: none; }
+  #preview { margin-top: 10px; max-width: 100%; max-height: 220px; border-radius: 12px; display: none; }
+  #error {
+    display: none; margin-top: 14px; padding: 12px 14px; border-radius: 12px;
+    background: rgba(255,59,48,.12); color: #ff3b30; font-size: 14px;
+  }
+  #submit {
+    position: sticky; bottom: 0; margin-top: 24px; width: 100%;
+    padding: 15px; font-size: 16px; font-weight: 600;
+    color: var(--accent-text); background: var(--accent);
+    border: none; border-radius: 12px; cursor: pointer;
+  }
+  #submit:disabled { opacity: .6; cursor: default; }
+</style>
+</head>
+<body>
+  <h1>📝 Новая заявка</h1>
+
+  <label for="supplier">Поставщик</label>
+  <input id="supplier" type="text" placeholder="Название поставщика" maxlength="200">
+
+  <label for="amount">Сумма</label>
+  <input id="amount" type="text" inputmode="decimal" placeholder="Например: 42500">
+
+  <label for="naryad">Наряд / проект</label>
+  <input id="naryad" type="text" placeholder="Номер наряда" maxlength="100">
+
+  <label>Фото или PDF счёта</label>
+  <div class="file-btn" id="fileBtn">
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M17 8l-5-5-5 5M12 3v12"/></svg>
+    <span id="fileLabel">Прикрепить счёт</span>
+  </div>
+  <input id="file" type="file" accept="image/*,application/pdf">
+  <img id="preview" alt="">
+
+  <div id="error"></div>
+
+  <button id="submit">Отправить заявку</button>
+
+<script>
+  const tg = window.Telegram ? window.Telegram.WebApp : null;
+  if (tg) { tg.ready(); tg.expand(); }
+
+  const $ = (id) => document.getElementById(id);
+
+  function showError(msg) { $("error").textContent = msg; $("error").style.display = "block"; }
+  function clearError() { $("error").style.display = "none"; }
+
+  $("fileBtn").addEventListener("click", (e) => { e.preventDefault(); $("file").click(); });
+
+  $("file").addEventListener("change", (e) => {
+    const f = e.target.files[0];
+    const btn = $("fileBtn"), label = $("fileLabel"), prev = $("preview");
+    if (!f) { label.textContent = "Прикрепить счёт"; btn.classList.remove("filled"); prev.style.display = "none"; return; }
+    label.textContent = f.name;
+    btn.classList.add("filled");
+    if (f.type.startsWith("image/")) {
+      prev.src = URL.createObjectURL(f); prev.style.display = "block";
+    } else {
+      prev.style.display = "none";
+    }
+  });
+
+  $("submit").addEventListener("click", async () => {
+    clearError();
+    const supplier = $("supplier").value.trim();
+    const amountRaw = $("amount").value.trim().replace(/\s/g, "").replace(",", ".");
+    const naryad = $("naryad").value.trim();
+    const file = $("file").files[0];
+
+    if (!supplier) return showError("Укажите поставщика.");
+    if (!amountRaw || isNaN(Number(amountRaw))) return showError("Укажите сумму числом.");
+    if (!naryad) return showError("Укажите наряд / проект.");
+    if (!file) return showError("Прикрепите фото или PDF счёта.");
+
+    const fd = new FormData();
+    fd.append("initData", tg ? tg.initData : "");
+    fd.append("supplier", supplier);
+    fd.append("amount", amountRaw);
+    fd.append("naryad", naryad);
+    fd.append("file", file);
+
+    $("submit").disabled = true;
+    $("submit").textContent = "Отправляю…";
+    try {
+      const resp = await fetch("buyer_request_submit", { method: "POST", body: fd });
+      const data = await resp.json();
+      if (data.ok) {
+        if (tg) { tg.HapticFeedback && tg.HapticFeedback.notificationOccurred("success"); tg.close(); }
+        else { document.body.innerHTML = "<h1>Заявка " + (data.request_no || "") + " отправлена на одобрение.</h1>"; }
+      } else {
+        showError(errorText(data.error));
+        $("submit").disabled = false; $("submit").textContent = "Отправить заявку";
+      }
+    } catch (e) {
+      showError("Сеть недоступна, попробуйте ещё раз.");
+      $("submit").disabled = false; $("submit").textContent = "Отправить заявку";
+    }
+  });
+
+  function errorText(code) {
+    const map = {
+      auth_failed: "Не удалось подтвердить вашу личность. Откройте форму через кнопку в боте.",
+      no_user: "Не удалось определить отправителя.",
+      not_buyer: "Подать заявку может только закупщик.",
+      no_supplier: "Укажите поставщика.",
+      bad_amount: "Укажите корректную сумму.",
+      no_naryad: "Укажите наряд / проект.",
+      no_file: "Прикрепите фото или PDF счёта.",
+      file_too_big: "Файл слишком большой (максимум 15 МБ).",
+      publish_failed: "Не получилось отправить заявку. Попробуйте ещё раз.",
+    };
+    return map[code] || "Что-то пошло не так. Попробуйте ещё раз.";
+  }
+</script>
+</body>
+</html>
