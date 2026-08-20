@@ -769,10 +769,15 @@ async def attach_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     context.user_data["attach_req_id"] = req_id
     no = core._display_no(req)
+    supplier = req.get("supplier") or "—"
+    amount_str = f"{req['amount']:,.0f}".replace(",", " ") if req.get("amount") and req["amount"] > 0 else "—"
     prompt = await context.bot.send_message(
         query.from_user.id,
-        f"Пришлите фото или PDF платёжки по {no} — "
-        f"прикреплю к заявке и отправлю тем, кто её запросил.\n\n"
+        f"📎 Прикрепить платёжку\n"
+        f"Заявка: {no}\n"
+        f"Поставщик: {supplier}\n"
+        f"Сумма: {amount_str}\n\n"
+        f"Пришлите фото или PDF платёжки.\n"
         f"/cancel — отмена")
     context.user_data["payment_prompt_msg_id"] = prompt.message_id
     return PAYMENT_FILE
@@ -806,9 +811,18 @@ async def attach_file_received(update: Update, context: ContextTypes.DEFAULT_TYP
     req = db.get_by_id(req_id)
     sent_to = await core.deliver_payment_to_pending(context.bot, req)
 
-    who = f" — отправлена запросившим ({len(sent_to)})" if sent_to else " — сохранена (запросов пока нет)"
+    who = f"\nОтправлена запросившим ({len(sent_to)})" if sent_to else "\nСохранена (запросов пока нет)"
+    no = core._display_no(req)
+    supplier = req.get("supplier") or "—"
+    amount_str = f"{req['amount']:,.0f}".replace(",", " ") if req.get("amount") and req["amount"] > 0 else "—"
     prompt_id = context.user_data.pop("payment_prompt_msg_id", None)
-    text = f"✅ Платёжка по {core._display_no(req)} прикреплена{who}."
+    text = (
+        f"✅ Платёжка прикреплена\n"
+        f"Заявка: {no}\n"
+        f"Поставщик: {supplier}\n"
+        f"Сумма: {amount_str}"
+        f"{who}"
+    )
     if prompt_id:
         try:
             await context.bot.edit_message_text(
