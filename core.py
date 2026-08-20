@@ -229,8 +229,15 @@ def kb_needpay_or_none(req):
 def kb_buyer(req):
     if req["status"] != "потребность":
         return None
+    if config.BUYERAPP_URL:
+        process_btn = InlineKeyboardButton(
+            "📝 Оформить заявку",
+            web_app=WebAppInfo(f"{config.BUYERAPP_URL}?req={req['id']}"))
+    else:
+        process_btn = InlineKeyboardButton(
+            "📝 Оформить заявку", callback_data=f"act:process:{req['id']}")
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📝 Оформить заявку", callback_data=f"act:process:{req['id']}")],
+        [process_btn],
         [InlineKeyboardButton("✖ Отклонить", callback_data=f"act:buyreject:{req['id']}")],
     ])
 

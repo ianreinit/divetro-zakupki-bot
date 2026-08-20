@@ -713,6 +713,15 @@ async def _act_pay(query, context, req, req_id, uid, now):
     await core.refresh_all_cards(context.bot, req)
     await core.notify_paid(context.bot, req)
     await core.send_driver_card(context.bot, req)
+    no = core._display_no(req)
+    for aid in core.accountant_ids():
+        try:
+            await context.bot.send_message(
+                aid,
+                f"📎 По {no} можно прикрепить платёжку.",
+                reply_markup=core.attach_kb(req_id))
+        except Exception as e:
+            log.warning("Не удалось отправить кнопку платёжки бухгалтеру %s: %s", aid, e)
 
 
 async def _act_needpay(query, context, req, req_id, uid, now):
@@ -1017,7 +1026,7 @@ NOT_ALLOWED_MSG = (
 
 
 def may_submit(user_id: int) -> bool:
-    if core.is_admin(user_id) or core.is_director(user_id) or core.is_accountant(user_id):
+    if core.is_admin(user_id) or core.is_director(user_id) or core.is_accountant(user_id) or core.is_buyer(user_id):
         return True
     if core.is_employee(user_id) or core.is_driver(user_id) or core.is_warehouse(user_id):
         return True

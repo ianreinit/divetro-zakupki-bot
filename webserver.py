@@ -31,6 +31,7 @@ log = logging.getLogger("zakupki-web")
 HERE = os.path.dirname(os.path.abspath(__file__))
 FORM_HTML = os.path.join(HERE, "webapp", "form.html")
 PAY_HTML = os.path.join(HERE, "webapp", "pay.html")
+BUYER_FORM_HTML = os.path.join(HERE, "webapp", "buyer_form.html")
 
 MAX_FILE_BYTES = 15 * 1024 * 1024
 
@@ -112,7 +113,8 @@ async def handle_mysector(request: web.Request) -> web.Response:
     sector = p["sector"] if p and p["sector"] else ""
     if not sector and len(config.SECTORS) == 1:
         if (core.is_employee(uid) or core.is_driver(uid) or core.is_warehouse(uid)
-                or core.is_director(uid) or core.is_accountant(uid) or core.is_admin(uid)):
+                or core.is_director(uid) or core.is_accountant(uid) or core.is_buyer(uid)
+                or core.is_admin(uid)):
             sector = config.SECTORS[0]
     admin_sector = config.ADMIN_SECTOR if core.is_director(uid) else ""
     return web.json_response(
@@ -146,7 +148,7 @@ async def handle_submit(request: web.Request) -> web.Response:
     person = db.get_person(submitter_id)
     assigned = person["sector"] if person is not None else None
     privileged = (core.is_director(submitter_id) or core.is_accountant(submitter_id)
-                  or core.is_admin(submitter_id))
+                  or core.is_buyer(submitter_id) or core.is_admin(submitter_id))
     has_role = (core.is_employee(submitter_id) or core.is_driver(submitter_id)
                 or core.is_warehouse(submitter_id))
     if not privileged and not has_role and not assigned:
@@ -192,6 +194,127 @@ async def handle_submit(request: web.Request) -> web.Response:
         return web.json_response({"ok": False, "error": "publish_failed"}, status=500)
 
     return web.json_response({"ok": True, "request_no": request_no})
+
+
+async def handle_buyer_form(request: web.Request) -> web.Response:
+    return web.FileResponse(BUYER_FORM_HTML)
+
+
+async def handle_buyer_need_info(request: web.Request) -> web.Response:
+    data = await request.post()
+    init = verify_init_data(data.get("initData", ""), config.BOT_TOKEN)
+    if init is None:
+        return web.json_response({"ok": False, "error": "auth_failed"}, status=403)
+    try:
+        user = json.loads(init.get("user", "{}"))
+        uid = int(user["id"])
+    except (ValueError, KeyError):
+        return web.json_response({"ok": False, "error": "no_user"}, status=403)
+
+    if not core.is_buyer(uid):
+        return web.json_response({"ok": False, "error": "not_buyer"}, status=403)
+
+    try:
+        req_id = int(data.get("req", ""))
+    except ValueError:
+        return web.json_response({"ok": False, "error": "bad_request"}, status=400)
+
+    req = db.get_by_id(req_id)
+    if req is None:
+        return web.json_response({"ok": False, "error": "not_found"}, status=404)
+    if req["status"] != "потребность":
+        return web.json_response({"ok": False, "error": "already_processed"}, status=400)
+
+    return web.json_response({
+        "ok": True,
+        "request_no": req.get("request_no", ""),
+        "order_no": req.get("order_no", ""),
+        "description": req.get("description", ""),
+        "needed_by": req.get("needed_by", ""),
+        "urgency": req.get("urgency", ""),
+        "submitted_by_name": req.get("submitted_by_name", ""),
+    })
+
+
+async def handle_buyer_submit(request: web.Request) -> web.Response:
+    bot = request.app["bot"]
+    try:
+        fields, file_bytes, file_name, file_ctype = await parse_multipart(request)
+    except FileTooLarge:
+        return web.json_response({"ok": False, "error": "file_too_big"}, status=413)
+    if fields is None:
+        return web.json_response({"ok": False, "error": "bad_request"}, status=400)
+
+    init = verify_init_data(fields.get("initData", ""), config.BOT_TOKEN)
+    if init is None:
+        return web.json_response({"ok": False, "error": "auth_failed"}, status=403)
+    try:
+        user = json.loads(init.get("user", "{}"))
+        uid = int(user["id"])
+        actor_name = " ".join(
+            p for p in [user.get("first_name"), user.get("last_name")] if p
+        ) or user.get("username") or str(uid)
+    except (ValueError, KeyError):
+        return web.json_response({"ok": False, "error": "no_user"}, status=403)
+
+    if not core.is_buyer(uid):
+        return web.json_response({"ok": False, "error": "not_buyer"}, status=403)
+
+    try:
+        req_id = int(fields.get("req", ""))
+    except ValueError:
+        return web.json_response({"ok": False, "error": "bad_request"}, status=400)
+
+    req = db.get_by_id(req_id)
+    if req is None:
+        return web.json_response({"ok": False, "error": "not_found"}, status=404)
+    if req["status"] != "потребность":
+        return web.json_response({"ok": False, "error": "already_processed"}, status=400)
+
+    supplier = fields.get("supplier", "").strip()
+    naryad = fields.get("naryad", "").strip()
+    if not supplier:
+        return web.json_response({"ok": False, "error": "no_supplier"}, status=400)
+    if len(supplier) > 200:
+        return web.json_response({"ok": False, "error": "no_supplier"}, status=400)
+    if not naryad:
+        return web.json_response({"ok": False, "error": "no_naryad"}, status=400)
+    if len(naryad) > 100:
+        return web.json_response({"ok": False, "error": "no_naryad"}, status=400)
+
+    try:
+        amount = float(fields.get("amount", "0").replace(" ", "").replace(",", "."))
+    except ValueError:
+        return web.json_response({"ok": False, "error": "bad_amount"}, status=400)
+    if amount <= 0:
+        return web.json_response({"ok": False, "error": "bad_amount"}, status=400)
+
+    if not file_bytes:
+        return web.json_response({"ok": False, "error": "no_file"}, status=400)
+
+    is_document = "pdf" in (file_ctype or "") or (file_name or "").lower().endswith(".pdf")
+
+    try:
+        media = InputFile(BytesIO(file_bytes), filename=file_name or "invoice")
+        no = core._display_no(req)
+        caption = f"📝 Заявка {no} оформлена и отправлена на одобрение."
+        _, file_id = await core._send_card(bot, uid, media, caption, is_document)
+    except Exception as e:
+        log.exception("buyer_submit: не удалось загрузить счёт: %s", e)
+        return web.json_response({"ok": False, "error": "publish_failed"}, status=500)
+
+    try:
+        await core.process_need(
+            bot, req_id,
+            supplier=supplier, amount=amount, naryad=naryad,
+            photo_file_id=file_id, is_document=is_document,
+            processed_by_id=uid, processed_by_name=actor_name,
+        )
+    except Exception as e:
+        log.exception("buyer_submit: не удалось оформить заявку: %s", e)
+        return web.json_response({"ok": False, "error": "publish_failed"}, status=500)
+
+    return web.json_response({"ok": True, "request_no": req.get("request_no", "")})
 
 
 async def handle_pay(request: web.Request) -> web.Response:
@@ -255,6 +378,9 @@ def build_web_app(bot) -> web.Application:
     app.router.add_get("/config", handle_config)
     app.router.add_post("/mysector", handle_mysector)
     app.router.add_post("/submit", handle_submit)
+    app.router.add_get("/buyer_form", handle_buyer_form)
+    app.router.add_post("/buyer_need_info", handle_buyer_need_info)
+    app.router.add_post("/buyer_submit", handle_buyer_submit)
     app.router.add_get("/pay", handle_pay)
     app.router.add_post("/attach_payment", handle_attach_payment)
     return app
