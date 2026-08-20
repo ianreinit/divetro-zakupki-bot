@@ -95,6 +95,9 @@ PAYAPP_URL = os.getenv("PAYAPP_URL", "") or (
 BUYERAPP_URL = os.getenv("BUYERAPP_URL", "") or (
     WEBAPP_URL.replace("/form", "/buyer_form") if WEBAPP_URL else "")
 
+BUYER_REQUEST_URL = os.getenv("BUYER_REQUEST_URL", "") or (
+    WEBAPP_URL.replace("/form", "/buyer_request_form") if WEBAPP_URL else "")
+
 # Где поднимать внутренний веб-сервер формы. На сервере он слушает локально,
 # а наружу его отдаёт nginx с TLS. WEB_PORT — порт за прокси.
 WEB_HOST = os.getenv("WEB_HOST", "127.0.0.1")

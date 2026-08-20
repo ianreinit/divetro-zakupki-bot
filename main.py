@@ -109,11 +109,16 @@ async def new_wizard(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return ORDER_NO
 
     if core.is_buyer(update.effective_user.id):
-        keyboard = [
+        buttons = [
             [InlineKeyboardButton("📋 Потребность", callback_data="wiz:need")],
-            [InlineKeyboardButton("📝 Новая заявка", callback_data="wiz:buyreq")],
         ]
-        await update.message.reply_text("Что подаёте?", reply_markup=InlineKeyboardMarkup(keyboard))
+        if config.BUYER_REQUEST_URL:
+            buttons.append([InlineKeyboardButton(
+                "📝 Новая заявка", web_app=WebAppInfo(config.BUYER_REQUEST_URL))])
+        else:
+            buttons.append([InlineKeyboardButton(
+                "📝 Новая заявка", callback_data="wiz:buyreq")])
+        await update.message.reply_text("Что подаёте?", reply_markup=InlineKeyboardMarkup(buttons))
         return ORDER_NO
 
     context.user_data["sector"] = config.SECTORS[0]
@@ -135,8 +140,12 @@ async def new_request(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             buttons.append([InlineKeyboardButton(
                 "📋 Потребность", callback_data="wiz:need")])
-        buttons.append([InlineKeyboardButton(
-            "📝 Новая заявка", callback_data="wiz:buyreq")])
+        if config.BUYER_REQUEST_URL:
+            buttons.append([InlineKeyboardButton(
+                "📝 Новая заявка", web_app=WebAppInfo(config.BUYER_REQUEST_URL))])
+        else:
+            buttons.append([InlineKeyboardButton(
+                "📝 Новая заявка", callback_data="wiz:buyreq")])
         await update.message.reply_text(
             "Что подаёте?", reply_markup=InlineKeyboardMarkup(buttons))
         return ORDER_NO

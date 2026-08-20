@@ -32,6 +32,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 FORM_HTML = os.path.join(HERE, "webapp", "form.html")
 PAY_HTML = os.path.join(HERE, "webapp", "pay.html")
 BUYER_FORM_HTML = os.path.join(HERE, "webapp", "buyer_form.html")
+BUYER_REQUEST_FORM_HTML = os.path.join(HERE, "webapp", "buyer_request_form.html")
 
 MAX_FILE_BYTES = 15 * 1024 * 1024
 
@@ -317,6 +318,77 @@ async def handle_buyer_submit(request: web.Request) -> web.Response:
     return web.json_response({"ok": True, "request_no": req.get("request_no", "")})
 
 
+async def handle_buyer_request_form(request: web.Request) -> web.Response:
+    return web.FileResponse(BUYER_REQUEST_FORM_HTML)
+
+
+async def handle_buyer_request_submit(request: web.Request) -> web.Response:
+    bot = request.app["bot"]
+    try:
+        fields, file_bytes, file_name, file_ctype = await parse_multipart(request)
+    except FileTooLarge:
+        return web.json_response({"ok": False, "error": "file_too_big"}, status=413)
+    if fields is None:
+        return web.json_response({"ok": False, "error": "bad_request"}, status=400)
+
+    init = verify_init_data(fields.get("initData", ""), config.BOT_TOKEN)
+    if init is None:
+        return web.json_response({"ok": False, "error": "auth_failed"}, status=403)
+    try:
+        user = json.loads(init.get("user", "{}"))
+        uid = int(user["id"])
+        actor_name = " ".join(
+            p for p in [user.get("first_name"), user.get("last_name")] if p
+        ) or user.get("username") or str(uid)
+    except (ValueError, KeyError):
+        return web.json_response({"ok": False, "error": "no_user"}, status=403)
+
+    if not core.is_buyer(uid):
+        return web.json_response({"ok": False, "error": "not_buyer"}, status=403)
+
+    supplier = fields.get("supplier", "").strip()
+    naryad = fields.get("naryad", "").strip()
+    if not supplier:
+        return web.json_response({"ok": False, "error": "no_supplier"}, status=400)
+    if len(supplier) > 200:
+        return web.json_response({"ok": False, "error": "no_supplier"}, status=400)
+    if not naryad:
+        return web.json_response({"ok": False, "error": "no_naryad"}, status=400)
+    if len(naryad) > 100:
+        return web.json_response({"ok": False, "error": "no_naryad"}, status=400)
+
+    try:
+        amount = float(fields.get("amount", "0").replace(" ", "").replace(",", "."))
+    except ValueError:
+        return web.json_response({"ok": False, "error": "bad_amount"}, status=400)
+    if amount <= 0:
+        return web.json_response({"ok": False, "error": "bad_amount"}, status=400)
+
+    if not file_bytes:
+        return web.json_response({"ok": False, "error": "no_file"}, status=400)
+
+    is_document = "pdf" in (file_ctype or "") or (file_name or "").lower().endswith(".pdf")
+
+    try:
+        request_no = await core.publish_request(
+            bot,
+            sector=config.SECTORS[0],
+            supplier=supplier,
+            amount=amount,
+            naryad=naryad,
+            submitter_id=uid,
+            submitter_name=actor_name,
+            file_bytes=file_bytes,
+            file_name=file_name or "invoice",
+            is_document=is_document,
+        )
+    except Exception as e:
+        log.exception("buyer_request_submit: не удалось создать заявку: %s", e)
+        return web.json_response({"ok": False, "error": "publish_failed"}, status=500)
+
+    return web.json_response({"ok": True, "request_no": request_no})
+
+
 async def handle_pay(request: web.Request) -> web.Response:
     return web.FileResponse(PAY_HTML)
 
@@ -381,6 +453,8 @@ def build_web_app(bot) -> web.Application:
     app.router.add_get("/buyer_form", handle_buyer_form)
     app.router.add_post("/buyer_need_info", handle_buyer_need_info)
     app.router.add_post("/buyer_submit", handle_buyer_submit)
+    app.router.add_get("/buyer_request_form", handle_buyer_request_form)
+    app.router.add_post("/buyer_request_submit", handle_buyer_request_submit)
     app.router.add_get("/pay", handle_pay)
     app.router.add_post("/attach_payment", handle_attach_payment)
     return app
