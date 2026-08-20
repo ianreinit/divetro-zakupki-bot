@@ -632,10 +632,16 @@ async def send_payment_file_to(bot, req, chat_id: int):
 
 async def deliver_payment_to_pending(bot, req):
     pending = db.get_payment_pending(req["id"])
+    sent = set()
     for uid in pending:
         await send_payment_file_to(bot, req, uid)
+        sent.add(uid)
     db.clear_payment_pending(req["id"])
-    return pending
+    for bid in buyer_ids():
+        if bid not in sent:
+            await send_payment_file_to(bot, req, bid)
+            sent.add(bid)
+    return sent
 
 
 async def send_driver_card(bot, req):
