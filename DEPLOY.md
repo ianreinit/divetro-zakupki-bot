@@ -32,7 +32,7 @@ sudo useradd --system --create-home --home-dir /opt/zakupki-bot --shell /usr/sbi
 На НОУТБУКЕ (не на сервере), из папки проекта, отправьте архив:
 ```
 tar --exclude venv --exclude .env --exclude '*.db' --exclude __pycache__ \
-    -czf /tmp/zakupki.tgz -C "/Users/yancuxxx/Desktop/Bot.Telegram Bertam" .
+    -czf /tmp/zakupki.tgz .
 scp /tmp/zakupki.tgz root@IP-вашего-сервера:/tmp/
 ```
 На СЕРВЕРЕ распакуйте:
