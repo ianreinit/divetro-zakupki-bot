@@ -769,7 +769,8 @@ async def _act_pay(query, context, req, req_id, uid, now):
     req = db.get_by_id(req_id)
     await core.refresh_all_cards(context.bot, req)
     await core.notify_paid(context.bot, req)
-    await core.send_driver_card(context.bot, req)
+    if req["sector"] != config.ADMIN_SECTOR:
+        await core.send_driver_card(context.bot, req)
     no = core._display_no(req)
     for aid in core.accountant_ids():
         try:
@@ -902,6 +903,9 @@ async def _act_ship(query, context, req, req_id, uid, now):
     if not core.is_driver(uid) and not core.is_admin(uid):
         await query.answer("Отметить может только водитель.", show_alert=True)
         return
+    if req["sector"] == config.ADMIN_SECTOR:
+        await query.answer("У административной заявки нет этапа логистики.", show_alert=True)
+        return
     if req["status"] != "оплачено":
         await query.answer("Заявка ещё не оплачена или уже в работе.", show_alert=True)
         return
@@ -916,6 +920,9 @@ async def _act_ship(query, context, req, req_id, uid, now):
 async def _act_receive(query, context, req, req_id, uid, now):
     if not core.is_warehouse(uid) and not core.is_admin(uid):
         await query.answer("Отметить может только склад.", show_alert=True)
+        return
+    if req["sector"] == config.ADMIN_SECTOR:
+        await query.answer("У административной заявки нет этапа логистики.", show_alert=True)
         return
     if req["status"] != "в_пути":
         await query.answer("Товар ещё не в пути или уже принят.", show_alert=True)
@@ -970,7 +977,12 @@ async def notify(context: ContextTypes.DEFAULT_TYPE, user_id: int, text: str):
 # ---------- Отчёт ----------
 
 async def report_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    sectors = config.ALL_SECTORS if is_privileged(update.effective_user.id) else config.SECTORS
+    uid = update.effective_user.id
+    if is_privileged(uid):
+        sectors = [s for s in config.ALL_SECTORS
+                   if s != config.ADMIN_SECTOR or can_see_admin_sector(uid)]
+    else:
+        sectors = list(config.SECTORS)
     buttons = [InlineKeyboardButton(s, callback_data=f"report:{s}") for s in sectors]
     keyboard = [buttons[i:i + 2] for i in range(0, len(buttons), 2)]
     keyboard.append([InlineKeyboardButton("Все направления", callback_data="report:Все")])
@@ -988,14 +1000,14 @@ async def report_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     sector = query.data.split(":", 1)[1]
-    priv = is_privileged(query.from_user.id)
-    if sector == config.ADMIN_SECTOR and not priv:
-        await query.edit_message_text("Раздел доступен только директору.")
+    uid = query.from_user.id
+    if sector == config.ADMIN_SECTOR and not can_see_admin_sector(uid):
+        await query.edit_message_text("Раздел доступен только директору, бухгалтеру или админу.")
         return
 
     month_start = datetime.now(config.TZ).replace(day=1, hour=0, minute=0, second=0).isoformat(timespec="seconds")
     rows = db.report(sector, month_start)
-    if not priv:
+    if not can_see_admin_sector(uid):
         rows = [r for r in rows if r["sector"] != config.ADMIN_SECTOR]
 
     total = sum(r["amount"] for r in rows)
@@ -1090,6 +1102,10 @@ def is_privileged(user_id: int) -> bool:
             or core.is_accountant(user_id) or core.is_buyer(user_id))
 
 
+def can_see_admin_sector(user_id: int) -> bool:
+    return core.is_admin(user_id) or core.is_director(user_id) or core.is_accountant(user_id)
+
+
 NOT_ALLOWED_MSG = (
     "Вы пока не закреплены за сектором, поэтому не можете подавать потребности.\n"
     "Обратитесь к директору — он добавит вас командой."
@@ -1140,8 +1156,10 @@ async def my_requests(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def list_requests(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     if is_privileged(uid):
-        buttons = [InlineKeyboardButton(s, callback_data=f"lst:{i}")
-                   for i, s in enumerate(config.ALL_SECTORS)]
+        visible = [s for s in config.ALL_SECTORS
+                   if s != config.ADMIN_SECTOR or can_see_admin_sector(uid)]
+        buttons = [InlineKeyboardButton(s, callback_data=f"lst:{config.ALL_SECTORS.index(s)}")
+                   for s in visible]
         keyboard = [buttons[i:i + 2] for i in range(0, len(buttons), 2)]
         keyboard.append([InlineKeyboardButton("Все секторы", callback_data="lst:all")])
         await update.message.reply_text(
@@ -1164,14 +1182,20 @@ async def list_requests(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def list_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    if not is_privileged(query.from_user.id):
+    uid = query.from_user.id
+    if not is_privileged(uid):
         return
     key = query.data.split(":", 1)[1]
     if key == "all":
         rows = db.list_all_requests(limit=25)
+        if not can_see_admin_sector(uid):
+            rows = [r for r in rows if r["sector"] != config.ADMIN_SECTOR]
         text = format_requests(rows, "📋 Все заявки", show_sector=True)
     else:
         sector = config.ALL_SECTORS[int(key)]
+        if sector == config.ADMIN_SECTOR and not can_see_admin_sector(uid):
+            await query.edit_message_text("Раздел доступен только директору, бухгалтеру или админу.")
+            return
         rows = db.list_by_sector(sector, limit=25)
         text = format_requests(rows, f"📋 Заявки сектора «{sector}»")
     await query.edit_message_text(text)

@@ -26,6 +26,11 @@ log = logging.getLogger("zakupki-core")
 
 # ---------- Разрешение ролей: назначение в БД переопределяет .env ----------
 
+def _unique_ids(ids):
+    """Return non-zero Telegram IDs once, preserving role order."""
+    return list(dict.fromkeys(uid for uid in ids if uid))
+
+
 def accountant_ids():
     ids = db.get_users_by_role(config.ROLE_ACCOUNTANT)
     ids2 = db.get_users_by_role(config.ROLE_ACCOUNTANT2)
@@ -36,8 +41,8 @@ def accountant_ids():
             fallback.append(config.ACCOUNTANT_ID)
         if config.ACCOUNTANT2_ID:
             fallback.append(config.ACCOUNTANT2_ID)
-        return fallback
-    return result
+        return _unique_ids(fallback)
+    return _unique_ids(result)
 
 
 def buyer_ids():
@@ -50,8 +55,8 @@ def buyer_ids():
             fallback.append(config.BUYER_ID)
         if config.BUYER2_ID:
             fallback.append(config.BUYER2_ID)
-        return fallback
-    return result
+        return _unique_ids(fallback)
+    return _unique_ids(result)
 
 
 def driver_ids():
@@ -279,10 +284,13 @@ def kb_buyer_rejected(req):
 def kb_admin(req):
     if req["status"] in ("получено", "отклонено"):
         return None
+    is_adm = req["sector"] == config.ADMIN_SECTOR
+    if is_adm and req["status"] == "оплачено":
+        return None
     rows = []
-    if req["status"] == "оплачено":
+    if not is_adm and req["status"] == "оплачено":
         rows.append([InlineKeyboardButton("🚚 Еду за товаром", callback_data=f"act:ship:{req['id']}")])
-    if req["status"] == "в_пути":
+    if not is_adm and req["status"] == "в_пути":
         rows.append([InlineKeyboardButton("📦 Принял на складе", callback_data=f"act:receive:{req['id']}")])
     if req["status"] not in ("потребность",):
         rows.append([InlineKeyboardButton("📄 Запросить платёжку", callback_data=f"act:needpay:{req['id']}")])
@@ -609,7 +617,10 @@ async def send_accountant_card(bot, req):
 
 async def notify_paid(bot, req):
     no = _display_no(req)
-    text = f"🧾 {no} — оплачено, можно ехать за материалом."
+    if req["sector"] == config.ADMIN_SECTOR:
+        text = f"🧾 {no} — административная заявка оплачена."
+    else:
+        text = f"🧾 {no} — оплачено, можно ехать за материалом."
     try:
         await bot.send_message(req["submitted_by_id"], text)
     except Exception as e:
@@ -634,13 +645,19 @@ async def deliver_payment_to_pending(bot, req):
     pending = db.get_payment_pending(req["id"])
     sent = set()
     for uid in pending:
+        if (req["sector"] == config.ADMIN_SECTOR
+                and not (is_director(uid) or is_accountant(uid) or is_admin(uid))):
+            continue
         await send_payment_file_to(bot, req, uid)
         sent.add(uid)
     db.clear_payment_pending(req["id"])
-    for bid in buyer_ids():
-        if bid not in sent:
-            await send_payment_file_to(bot, req, bid)
-            sent.add(bid)
+    # Административный платёж завершает путь у бухгалтерии: закупщикам его
+    # платёжка не нужна и не должна раскрывать административную заявку.
+    if req["sector"] != config.ADMIN_SECTOR:
+        for bid in buyer_ids():
+            if bid not in sent:
+                await send_payment_file_to(bot, req, bid)
+                sent.add(bid)
     return sent
 
 
