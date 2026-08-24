@@ -51,10 +51,15 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         sector_line = f"Ваш сектор: {person['sector']}\n" if (person and person["sector"]) else ""
         role_line = f"Ваша роль: {role}\n" if (role and not person.get("sector")) else ""
         kb = None
-        if config.WEBAPP_URL and not core.is_buyer(user.id):
+        if config.WEBAPP_URL and not (core.is_buyer(user.id) or core.is_admin(user.id)):
             kb = InlineKeyboardMarkup([[InlineKeyboardButton(
                 "📋 Подать потребность", web_app=WebAppInfo(config.WEBAPP_URL))]])
-        new_hint = "потребность или заявка" if core.is_buyer(user.id) else "подать потребность"
+        if core.is_admin(user.id):
+            new_hint = "потребность, заявку или административный платёж"
+        elif core.is_buyer(user.id):
+            new_hint = "потребность или заявку"
+        else:
+            new_hint = "подать потребность"
         await update.message.reply_text(
             f"Привет, {user.first_name}! Я бот закупок.\n{sector_line}{role_line}\n"
             f"📋 /new — {new_hint}\n"
@@ -100,6 +105,15 @@ async def new_wizard(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(NOT_ALLOWED_MSG)
         return ConversationHandler.END
 
+    if core.is_admin(update.effective_user.id):
+        keyboard = [
+            [InlineKeyboardButton("📋 Потребность (закупка)", callback_data="wiz:need")],
+            [InlineKeyboardButton("📝 Обычная заявка", callback_data="wiz:buyreq")],
+            [InlineKeyboardButton("🏢 Административный платёж", callback_data="wiz:adm")],
+        ]
+        await update.message.reply_text("Что подаёте?", reply_markup=InlineKeyboardMarkup(keyboard))
+        return ORDER_NO
+
     if core.is_director(update.effective_user.id):
         keyboard = [
             [InlineKeyboardButton("📋 Потребность (закупка)", callback_data="wiz:need")],
@@ -131,6 +145,26 @@ async def new_request(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not may_submit(update.effective_user.id):
         await update.message.reply_text(NOT_ALLOWED_MSG)
         return ConversationHandler.END
+
+    if core.is_admin(update.effective_user.id):
+        buttons = []
+        if config.WEBAPP_URL:
+            buttons.append([InlineKeyboardButton(
+                "📋 Потребность (закупка)", web_app=WebAppInfo(config.WEBAPP_URL))])
+        else:
+            buttons.append([InlineKeyboardButton(
+                "📋 Потребность (закупка)", callback_data="wiz:need")])
+        if config.BUYER_REQUEST_URL:
+            buttons.append([InlineKeyboardButton(
+                "📝 Обычная заявка", web_app=WebAppInfo(config.BUYER_REQUEST_URL))])
+        else:
+            buttons.append([InlineKeyboardButton(
+                "📝 Обычная заявка", callback_data="wiz:buyreq")])
+        buttons.append([InlineKeyboardButton(
+            "🏢 Административный платёж", callback_data="wiz:adm")])
+        await update.message.reply_text(
+            "Что подаёте?", reply_markup=InlineKeyboardMarkup(buttons))
+        return ORDER_NO
 
     if core.is_buyer(update.effective_user.id):
         buttons = []
@@ -180,16 +214,16 @@ async def wiz_type_chosen(update: Update, context: ContextTypes.DEFAULT_TYPE):
     choice = query.data.split(":", 1)[1]
 
     if choice == "adm":
-        if not core.is_director(query.from_user.id):
-            await query.edit_message_text("Эта категория доступна только директору.")
+        if not (core.is_director(query.from_user.id) or core.is_admin(query.from_user.id)):
+            await query.edit_message_text("Эта категория доступна только директору или администратору.")
             return ConversationHandler.END
         context.user_data["sector"] = config.ADMIN_SECTOR
         await query.edit_message_text("Административный платёж\n\nПоставщик?")
         return ADM_SUPPLIER
 
     if choice == "buyreq":
-        if not core.is_buyer(query.from_user.id):
-            await query.edit_message_text("Эта функция доступна только закупщику.")
+        if not (core.is_buyer(query.from_user.id) or core.is_admin(query.from_user.id)):
+            await query.edit_message_text("Эта функция доступна только закупщику или администратору.")
             return ConversationHandler.END
         context.user_data["sector"] = config.SECTORS[0]
         await query.edit_message_text("📝 Новая заявка\n\nПоставщик?")
@@ -321,7 +355,7 @@ async def need_skip_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 
-# --- Админ-путь (директор, полная заявка) ---
+# --- Полная заявка (директор/администратор/закупщик по доступному типу) ---
 
 async def adm_supplier_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
@@ -1347,7 +1381,7 @@ async def daily_backup(context: ContextTypes.DEFAULT_TYPE):
 def build_application() -> Application:
     app = Application.builder().token(config.BOT_TOKEN).build()
 
-    # Мастер сотрудника (потребность + админ-заявка директора)
+    # Потребность и полные заявки, доступные роли пользователя
     employee_conv = ConversationHandler(
         entry_points=[
             CommandHandler("new", new_request),

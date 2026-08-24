@@ -117,7 +117,7 @@ async def handle_mysector(request: web.Request) -> web.Response:
                 or core.is_director(uid) or core.is_accountant(uid) or core.is_buyer(uid)
                 or core.is_admin(uid)):
             sector = config.SECTORS[0]
-    admin_sector = config.ADMIN_SECTOR if core.is_director(uid) else ""
+    admin_sector = config.ADMIN_SECTOR if (core.is_director(uid) or core.is_admin(uid)) else ""
     return web.json_response(
         {"sector": sector, "locked": bool(sector), "admin_sector": admin_sector})
 
@@ -343,7 +343,7 @@ async def handle_buyer_request_submit(request: web.Request) -> web.Response:
     except (ValueError, KeyError):
         return web.json_response({"ok": False, "error": "no_user"}, status=403)
 
-    if not core.is_buyer(uid):
+    if not (core.is_buyer(uid) or core.is_admin(uid)):
         return web.json_response({"ok": False, "error": "not_buyer"}, status=403)
 
     supplier = fields.get("supplier", "").strip()

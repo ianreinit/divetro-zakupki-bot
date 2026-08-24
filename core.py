@@ -516,7 +516,7 @@ async def process_need(bot, request_id: int, *, supplier: str, amount: float,
     await send_admin_card(bot, req)
 
 
-# ---------- Публикация административной заявки (директор, без закупщика) ----------
+# ---------- Публикация полной заявки (обычной или административной) ----------
 
 async def publish_request(bot, *, sector: str, supplier: str, amount: float,
                           naryad: str, submitter_id: int, submitter_name: str,
