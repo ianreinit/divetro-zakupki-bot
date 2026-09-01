@@ -59,7 +59,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif core.is_buyer(user.id):
             new_hint = "потребность или заявку"
         elif core.is_driver(user.id):
-            new_hint = "обычную или административную заявку"
+            new_hint = "новую потребность, новую или административную заявку"
         else:
             new_hint = "подать потребность"
         await update.message.reply_text(
@@ -139,7 +139,8 @@ async def new_wizard(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if core.is_driver(update.effective_user.id):
         keyboard = [
-            [InlineKeyboardButton("📝 Обычная заявка", callback_data="wiz:buyreq")],
+            [InlineKeyboardButton("📋 Новая потребность", callback_data="wiz:need")],
+            [InlineKeyboardButton("📝 Новая заявка", callback_data="wiz:buyreq")],
             [InlineKeyboardButton("🏢 Административная заявка", callback_data="wiz:adm")],
         ]
         await update.message.reply_text("Что подаёте?", reply_markup=InlineKeyboardMarkup(keyboard))
@@ -196,12 +197,18 @@ async def new_request(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if core.is_driver(update.effective_user.id):
         buttons = []
-        if config.BUYER_REQUEST_URL:
+        if config.WEBAPP_URL:
             buttons.append([InlineKeyboardButton(
-                "📝 Обычная заявка", web_app=WebAppInfo(config.BUYER_REQUEST_URL))])
+                "📋 Новая потребность", web_app=WebAppInfo(config.WEBAPP_URL))])
         else:
             buttons.append([InlineKeyboardButton(
-                "📝 Обычная заявка", callback_data="wiz:buyreq")])
+                "📋 Новая потребность", callback_data="wiz:need")])
+        if config.BUYER_REQUEST_URL:
+            buttons.append([InlineKeyboardButton(
+                "📝 Новая заявка", web_app=WebAppInfo(config.BUYER_REQUEST_URL))])
+        else:
+            buttons.append([InlineKeyboardButton(
+                "📝 Новая заявка", callback_data="wiz:buyreq")])
         buttons.append([InlineKeyboardButton(
             "🏢 Административная заявка", callback_data="wiz:adm")])
         await update.message.reply_text(
