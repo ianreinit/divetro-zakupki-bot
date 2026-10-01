@@ -315,8 +315,9 @@ async def _edit_caption(bot, chat_id, msg_id, caption, reply_markup):
         await bot.edit_message_caption(
             chat_id=chat_id, message_id=msg_id, caption=_trim_caption(caption),
             reply_markup=reply_markup)
-    except BadRequest:
-        pass
+    except BadRequest as e:
+        if "message is not modified" not in str(e).lower():
+            log.warning("edit_caption rejected %s/%s: %s", chat_id, msg_id, e)
     except Exception as e:
         log.warning("edit_caption failed %s/%s: %s", chat_id, msg_id, e)
 
@@ -327,8 +328,9 @@ async def _edit_text(bot, chat_id, msg_id, text, reply_markup):
     try:
         await bot.edit_message_text(
             chat_id=chat_id, message_id=msg_id, text=text, reply_markup=reply_markup)
-    except BadRequest:
-        pass
+    except BadRequest as e:
+        if "message is not modified" not in str(e).lower():
+            log.warning("edit_text rejected %s/%s: %s", chat_id, msg_id, e)
     except Exception as e:
         log.warning("edit_text failed %s/%s: %s", chat_id, msg_id, e)
 
@@ -337,12 +339,25 @@ async def refresh_all_cards(bot, req):
     text = build_need_text(req)
     npkb = kb_needpay_or_none(req)
     has_need_photo = bool(req.get("need_photo_file_id"))
+    # Потребность создаёт сотруднику текстовую карточку (или карточку с
+    # need_photo_file_id). Прямая полная заявка сразу отправляется со счётом,
+    # поэтому её notify_message_id указывает на фото/PDF и требует изменения
+    # caption, даже если need_photo_file_id у неё отсутствует.
+    is_direct_request = bool(
+        req.get("photo_file_id")
+        and not req.get("description")
+        and not req.get("needed_by")
+    )
+    submitter_card_is_media = has_need_photo or is_direct_request
+    submitter_text = build_full_caption(req) if is_direct_request else text
 
     # Карточка сотрудника (фото или текст)
-    if has_need_photo and req.get("notify_message_id"):
-        await _edit_caption(bot, req["submitted_by_id"], req["notify_message_id"], text, npkb)
+    if submitter_card_is_media and req.get("notify_message_id"):
+        await _edit_caption(
+            bot, req["submitted_by_id"], req["notify_message_id"], submitter_text, npkb)
     else:
-        await _edit_text(bot, req["submitted_by_id"], req["notify_message_id"], text, npkb)
+        await _edit_text(
+            bot, req["submitted_by_id"], req["notify_message_id"], submitter_text, npkb)
 
     # Карточки закупщиков (фото или текст)
     bids = buyer_ids()
