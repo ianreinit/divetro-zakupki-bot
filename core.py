@@ -12,6 +12,7 @@
 Административные заявки директора обходят закупщика: publish_request.
 """
 import logging
+import math
 from datetime import datetime
 from io import BytesIO
 from functools import wraps
@@ -229,13 +230,14 @@ def build_need_text(req) -> str:
 def build_full_caption(req) -> str:
     no = _display_no(req)
     amount_str = f"{req['amount']:,.0f}".replace(",", " ") if req.get("amount") and req["amount"] > 0 else "—"
-    lines = [f"🧾 {no}"]
+    administrative = req["sector"] == config.ADMIN_SECTOR
+    lines = [f"🏢 Административный платёж\n{no}" if administrative else f"🧾 {no}"]
     if req.get("supplier"):
         lines.append(f"Поставщик: {req['supplier']}")
     if req["amount"] and req["amount"] > 0:
         lines.append(f"Сумма: {amount_str}")
     if req.get("naryad"):
-        lines.append(f"Наряд: {req['naryad']}")
+        lines.append(f"{'Назначение' if administrative else 'Наряд'}: {req['naryad']}")
     if req.get("description"):
         lines.append(f"Что нужно: {req['description']}")
     lines.append(f"От: {req['submitted_by_name']}")
@@ -243,6 +245,8 @@ def build_full_caption(req) -> str:
         lines.append(f"Оформил: {req['processed_by']}")
     lines.append("")
     lines.append(progress_block(req))
+    if administrative and not req.get("photo_file_id"):
+        lines.append("📎 Счёт не приложен")
     return with_comment_preview("\n".join(lines), req, limit=980)
 
 
@@ -450,8 +454,8 @@ async def refresh_all_cards(bot, req):
         and not req.get("needed_by")
     )
     submitter_card_is_media = has_need_photo or is_direct_request
-    submitter_text = build_full_caption(req) if is_direct_request else text
     is_administrative = req["sector"] == config.ADMIN_SECTOR
+    submitter_text = build_full_caption(req) if is_direct_request or is_administrative else text
     submitter_can_view = (not is_administrative or is_director(req["submitted_by_id"])
                           or is_accountant(req["submitted_by_id"]) or is_admin(req["submitted_by_id"]))
 
@@ -476,18 +480,19 @@ async def refresh_all_cards(bot, req):
                 await _edit_text(bot, bid, msg_id, text, kb_buyer(req))
 
     # Фото-карточки (существуют только после оформления закупщиком)
-    if req.get("photo_file_id"):
+    if req.get("photo_file_id") or is_administrative:
         cap = build_full_caption(req)
+        edit_card = _edit_caption if req.get("photo_file_id") else _edit_text
         did = director_id()
         if did and req.get("director_msg_id"):
             director_kb = kb_director_approve(req["id"]) if req["status"] == "оформлено" else npkb
-            await _edit_caption(bot, did, req["director_msg_id"], cap, director_kb)
+            await edit_card(bot, did, req["director_msg_id"], cap, director_kb)
 
         acc_ids = accountant_ids()
         if req.get("accountant_msg_id") and len(acc_ids) > 0:
-            await _edit_caption(bot, acc_ids[0], req["accountant_msg_id"], cap, kb_accountant(req))
+            await edit_card(bot, acc_ids[0], req["accountant_msg_id"], cap, kb_accountant(req))
         if req.get("accountant2_msg_id") and len(acc_ids) > 1:
-            await _edit_caption(bot, acc_ids[1], req["accountant2_msg_id"], cap, kb_accountant(req))
+            await edit_card(bot, acc_ids[1], req["accountant2_msg_id"], cap, kb_accountant(req))
 
         if not is_administrative and req.get("driver_msg_id"):
             drv = driver_ids()
@@ -503,11 +508,17 @@ async def refresh_all_cards(bot, req):
             cap = build_full_caption(req) if req.get("photo_file_id") else text
             await _edit_caption(bot, config.ADMIN_ID, req["admin_msg_id"], cap, kb_admin(req))
         else:
-            await _edit_text(bot, config.ADMIN_ID, req["admin_msg_id"], text, kb_admin(req))
+            await _edit_text(bot, config.ADMIN_ID, req["admin_msg_id"],
+                             build_full_caption(req) if is_administrative else text, kb_admin(req))
 
 
 async def _send_card(bot, chat_id, media, caption, is_document, reply_markup=None,
                      reply_to_message_id=None):
+    if media is None:
+        message = await bot.send_message(chat_id, caption, reply_markup=reply_markup,
+                                        reply_to_message_id=reply_to_message_id,
+                                        allow_sending_without_reply=True)
+        return message, None
     caption = _trim_caption(caption)
     extra = {}
     if reply_to_message_id:
@@ -645,6 +656,11 @@ async def publish_request(bot, *, sector: str, supplier: str, amount: float,
                           photo_file_id: str = None,
                           file_bytes: bytes = None, file_name: str = None,
                           is_document: bool = False) -> str:
+    if not supplier.strip() or not math.isfinite(amount) or amount <= 0:
+        raise ValueError("Supplier and positive finite amount are required")
+    if not photo_file_id and not file_bytes:
+        if sector != config.ADMIN_SECTOR or not is_director(submitter_id):
+            raise ValueError("Invoice is required for this request")
     prefix = config.SECTOR_PREFIX[sector]
     request_no = db.next_request_no(sector, prefix)
     now_dt = datetime.now(config.TZ)
@@ -668,7 +684,13 @@ async def publish_request(bot, *, sector: str, supplier: str, amount: float,
     def media():
         if stored["file_id"]:
             return stored["file_id"]
-        return InputFile(BytesIO(file_bytes), filename=file_name or "invoice")
+        return InputFile(BytesIO(file_bytes), filename=file_name or "invoice") if file_bytes else None
+
+    def caption():
+        current = db.get_by_id(request_id)
+        if file_bytes and not current.get("photo_file_id"):
+            current["photo_file_id"] = "uploading"
+        return build_full_caption(current)
 
     def remember(fid):
         if fid and not stored["file_id"]:
@@ -679,7 +701,7 @@ async def publish_request(bot, *, sector: str, supplier: str, amount: float,
 
     if auto_approve:
         db.set_status(request_id, "одобрено", "approved_by", submitter_name, "approved_at", now)
-        card_caption = build_full_caption(db.get_by_id(request_id))
+        card_caption = caption()
         try:
             card, fid = await _send_card(bot, submitter_id, media(), card_caption,
                                          is_document, reply_markup=needpay_kb(request_id))
@@ -692,7 +714,7 @@ async def publish_request(bot, *, sector: str, supplier: str, amount: float,
         remember(afid)
         return request_no
 
-    full_caption = build_full_caption(db.get_by_id(request_id))
+    full_caption = caption()
     kb = kb_director_approve(request_id)
     did = director_id()
     if did:
@@ -721,7 +743,7 @@ async def publish_request(bot, *, sector: str, supplier: str, amount: float,
 
 async def send_accountant_card(bot, req):
     ids = accountant_ids()
-    if not ids or not req["photo_file_id"]:
+    if not ids or (not req["photo_file_id"] and req["sector"] != config.ADMIN_SECTOR):
         return
     caption = build_full_caption(req)
     kb = kb_accountant(req)
@@ -840,7 +862,7 @@ async def notify_buyer_rejected(bot, req):
 
 
 async def send_admin_card(bot, req, file_id_or_input=None):
-    if not config.ADMIN_ID or not req["photo_file_id"]:
+    if not config.ADMIN_ID or (not req["photo_file_id"] and req["sector"] != config.ADMIN_SECTOR):
         return None
     if req["submitted_by_id"] == config.ADMIN_ID:
         return None

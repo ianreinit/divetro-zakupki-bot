@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import math
 import os
 import signal
 import sqlite3
@@ -173,7 +174,9 @@ async def new_request(update: Update, context: ContextTypes.DEFAULT_TYPE):
             buttons.append([InlineKeyboardButton(
                 "📝 Обычная заявка", callback_data="wiz:buyreq")])
         buttons.append([InlineKeyboardButton(
-            "🏢 Административный платёж", callback_data="wiz:adm")])
+            "🏢 Административный платёж", web_app=WebAppInfo(config.ADMIN_REQUEST_URL))
+            if core.is_director(update.effective_user.id) and config.ADMIN_REQUEST_URL
+            else InlineKeyboardButton("🏢 Административный платёж", callback_data="wiz:adm")])
         await update.message.reply_text(
             "Что подаёте?", reply_markup=InlineKeyboardMarkup(buttons))
         return ORDER_NO
@@ -225,7 +228,9 @@ async def new_request(update: Update, context: ContextTypes.DEFAULT_TYPE):
             buttons.append([InlineKeyboardButton(
                 "📋 Потребность (закупка)", callback_data="wiz:need")])
         buttons.append([InlineKeyboardButton(
-            "📝 Административный платёж", callback_data="wiz:adm")])
+            "🏢 Административный платёж", web_app=WebAppInfo(config.ADMIN_REQUEST_URL))
+            if config.ADMIN_REQUEST_URL else InlineKeyboardButton(
+                "🏢 Административный платёж", callback_data="wiz:adm")])
         await update.message.reply_text(
             "Что подаёте?", reply_markup=InlineKeyboardMarkup(buttons))
         return ORDER_NO
@@ -395,8 +400,8 @@ async def need_skip_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def adm_supplier_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
-    if len(text) > MAX_SUPPLIER:
-        await update.message.reply_text(f"Слишком длинное название (макс. {MAX_SUPPLIER} символов).")
+    if not text or len(text) > MAX_SUPPLIER:
+        await update.message.reply_text(f"Укажите поставщика: от 1 до {MAX_SUPPLIER} символов.")
         return ADM_SUPPLIER
     context.user_data["supplier"] = text
     await update.message.reply_text("Сумма?")
@@ -407,12 +412,60 @@ async def adm_amount_received(update: Update, context: ContextTypes.DEFAULT_TYPE
     text = update.message.text.strip().replace(" ", "").replace(",", ".")
     try:
         amount = float(text)
+        if not math.isfinite(amount) or amount <= 0:
+            raise ValueError
     except ValueError:
         await update.message.reply_text("Не понял сумму, введите числом, например 42500")
         return ADM_AMOUNT
     context.user_data["amount"] = amount
-    await update.message.reply_text("Номер наряда / проекта?")
+    optional = director_optional_invoice(context, update.effective_user.id)
+    await update.message.reply_text(
+        "Назначение платежа (необязательно):" if optional else "Номер наряда / проекта?",
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(
+            "Пропустить", callback_data="adm:skip_purpose")]]) if optional else None)
     return ADM_NARYAD
+
+
+def director_optional_invoice(context, uid):
+    return context.user_data.get("sector") == config.ADMIN_SECTOR and core.is_director(uid)
+
+
+async def adm_ask_photo(update, context):
+    optional = director_optional_invoice(context, update.effective_user.id)
+    text = ("Прикрепите фото или PDF счёта либо отправьте без счёта." if optional
+            else "Прикрепите фото или PDF счёта — без него заявку отправить нельзя.")
+    kb = InlineKeyboardMarkup([[InlineKeyboardButton(
+        "Отправить без счёта", callback_data="adm:skip_invoice")]]) if optional else None
+    if update.callback_query:
+        await update.callback_query.edit_message_text(text, reply_markup=kb)
+    else:
+        await update.message.reply_text(text, reply_markup=kb)
+    return ADM_PHOTO
+
+
+async def adm_skip_purpose(update, context):
+    query = update.callback_query
+    if not director_optional_invoice(context, query.from_user.id):
+        await query.answer("Недоступно.", show_alert=True)
+        return ADM_NARYAD
+    await query.answer()
+    context.user_data["naryad"] = ""
+    return await adm_ask_photo(update, context)
+
+
+async def adm_skip_invoice(update, context):
+    query = update.callback_query
+    if not director_optional_invoice(context, query.from_user.id):
+        await query.answer("Недоступно.", show_alert=True)
+        return ADM_PHOTO
+    await query.answer()
+    data = context.user_data
+    await core.publish_request(context.bot, sector=data["sector"], supplier=data["supplier"],
+        amount=data["amount"], naryad=data.get("naryad", ""),
+        submitter_id=query.from_user.id, submitter_name=query.from_user.full_name)
+    await query.edit_message_text("Административный платёж отправлен бухгалтеру.")
+    context.user_data.clear()
+    return ConversationHandler.END
 
 
 async def adm_naryad_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -421,10 +474,7 @@ async def adm_naryad_received(update: Update, context: ContextTypes.DEFAULT_TYPE
         await update.message.reply_text(f"Слишком длинный наряд (макс. {MAX_NARYAD} символов).")
         return ADM_NARYAD
     context.user_data["naryad"] = text
-    await update.message.reply_text(
-        "Прикрепите фото или PDF счёта — без него заявку отправить нельзя."
-    )
-    return ADM_PHOTO
+    return await adm_ask_photo(update, context)
 
 
 async def adm_photo_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1461,8 +1511,10 @@ def build_application() -> Application:
             ],
             ADM_SUPPLIER: [MessageHandler(filters.TEXT & ~filters.COMMAND, adm_supplier_received)],
             ADM_AMOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, adm_amount_received)],
-            ADM_NARYAD: [MessageHandler(filters.TEXT & ~filters.COMMAND, adm_naryad_received)],
-            ADM_PHOTO: [MessageHandler((filters.PHOTO | filters.Document.ALL) & ~filters.COMMAND, adm_photo_received)],
+            ADM_NARYAD: [MessageHandler(filters.TEXT & ~filters.COMMAND, adm_naryad_received),
+                         CallbackQueryHandler(adm_skip_purpose, pattern=r"^adm:skip_purpose$")],
+            ADM_PHOTO: [MessageHandler((filters.PHOTO | filters.Document.ALL) & ~filters.COMMAND, adm_photo_received),
+                        CallbackQueryHandler(adm_skip_invoice, pattern=r"^adm:skip_invoice$")],
         },
         fallbacks=[CommandHandler("cancel", cancel)],
         conversation_timeout=600,

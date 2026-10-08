@@ -14,6 +14,7 @@ import hashlib
 import hmac
 import json
 import logging
+import math
 import os
 import time
 from datetime import datetime
@@ -326,6 +327,53 @@ async def handle_buyer_request_form(request: web.Request) -> web.Response:
     return web.FileResponse(BUYER_REQUEST_FORM_HTML)
 
 
+async def handle_admin_request_form(request):
+    return web.FileResponse(os.path.join(HERE, "webapp", "admin_request.html"))
+
+
+async def handle_admin_request_submit(request):
+    try:
+        fields, file_bytes, file_name, file_ctype = await parse_multipart(request)
+    except FileTooLarge:
+        return web.json_response({"ok": False, "error": "file_too_big"}, status=413)
+    if fields is None:
+        return web.json_response({"ok": False, "error": "bad_request"}, status=400)
+    try:
+        init = verify_init_data(fields.get("initData", ""), config.BOT_TOKEN)
+        if init is None:
+            return web.json_response({"ok": False, "error": "auth_failed"}, status=403)
+        user = json.loads(init.get("user", "{}"))
+        uid = int(user["id"])
+    except (ValueError, TypeError, KeyError):
+        return web.json_response({"ok": False, "error": "auth_failed"}, status=403)
+    if not core.is_director(uid):
+        return web.json_response({"ok": False, "error": "not_director"}, status=403)
+    supplier = fields.get("supplier", "").strip()
+    purpose = fields.get("naryad", "").strip()
+    if not supplier or len(supplier) > 200:
+        return web.json_response({"ok": False, "error": "no_supplier"}, status=400)
+    if len(purpose) > 100:
+        return web.json_response({"ok": False, "error": "bad_purpose"}, status=400)
+    try:
+        amount = float(fields.get("amount", "0").replace(" ", "").replace(",", "."))
+        if not math.isfinite(amount) or amount <= 0:
+            raise ValueError
+    except ValueError:
+        return web.json_response({"ok": False, "error": "bad_amount"}, status=400)
+    if file_bytes and not ((file_ctype or "").startswith("image/") or file_ctype == "application/pdf"):
+        return web.json_response({"ok": False, "error": "bad_file"}, status=400)
+    name = " ".join(p for p in [user.get("first_name"), user.get("last_name")] if p) or str(uid)
+    try:
+        no = await core.publish_request(request.app["bot"], sector=config.ADMIN_SECTOR,
+            supplier=supplier, amount=amount, naryad=purpose, submitter_id=uid, submitter_name=name,
+            file_bytes=file_bytes, file_name=file_name,
+            is_document=bool(file_ctype and file_ctype == "application/pdf"))
+    except Exception:
+        log.exception("Не удалось опубликовать административный платёж директора")
+        return web.json_response({"ok": False, "error": "publish_failed"}, status=500)
+    return web.json_response({"ok": True, "request_no": no})
+
+
 async def handle_buyer_request_submit(request: web.Request) -> web.Response:
     bot = request.app["bot"]
     try:
@@ -503,6 +551,8 @@ def build_web_app(bot) -> web.Application:
     app["notification_lock"] = asyncio.Lock()
     comments.register(app, verify_init_data)
     app.router.add_get("/notify", handle_notify_form)
+    app.router.add_get("/admin_request", handle_admin_request_form)
+    app.router.add_post("/admin_request_submit", handle_admin_request_submit)
     app.router.add_post("/notify_payment", handle_notify_payment)
     app.router.add_get("/form", handle_form)
     app.router.add_get("/config", handle_config)
