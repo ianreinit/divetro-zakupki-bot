@@ -27,6 +27,7 @@ from telegram import InputFile
 import config
 import core
 import db
+import comments
 
 log = logging.getLogger("zakupki-web")
 
@@ -500,6 +501,7 @@ def build_web_app(bot) -> web.Application:
     app = web.Application()
     app["bot"] = bot
     app["notification_lock"] = asyncio.Lock()
+    comments.register(app, verify_init_data)
     app.router.add_get("/notify", handle_notify_form)
     app.router.add_post("/notify_payment", handle_notify_payment)
     app.router.add_get("/form", handle_form)

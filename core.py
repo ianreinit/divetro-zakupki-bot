@@ -14,6 +14,7 @@
 import logging
 from datetime import datetime
 from io import BytesIO
+from functools import wraps
 
 from telegram import InputFile, InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
 from telegram.error import BadRequest
@@ -157,6 +158,48 @@ def _display_no(req) -> str:
     return req.get("order_no") or req["request_no"]
 
 
+def with_comment_preview(text, req, limit=4096):
+    latest = db.comment_summary(req["id"])
+    if not latest:
+        return text
+    excerpt = " ".join(latest["body"].split())
+    if len(excerpt) > 160:
+        excerpt = excerpt[:157] + "…"
+    footer = (f"\n\n💬 Последний комментарий · {latest['total']}\n"
+              f"{latest['author_name'][:60]} · {_fmt_dt(latest['created_at'])}\n«{excerpt}»")
+    space = limit - len(footer) - 1
+    if len(text) > space:
+        text = text[:space - 1] + "…"
+    return text + footer
+
+
+def comments_kb(req_id, label=None):
+    if not config.COMMENTSAPP_URL:
+        return None
+    if label is None:
+        summary = db.comment_summary(req_id)
+        label = f"💬 Комментарии · {summary['total'] if summary else 0}"
+    return InlineKeyboardMarkup([[InlineKeyboardButton(
+        label, web_app=WebAppInfo(f"{config.COMMENTSAPP_URL}?req={req_id}"))]])
+
+
+def with_comments(keyboard_fn):
+    @wraps(keyboard_fn)
+    def wrapped(req):
+        keyboard = keyboard_fn(req)
+        req_id = req["id"] if isinstance(req, dict) else req
+        extra = comments_kb(req_id)
+        if not extra:
+            return keyboard
+        rows = list(keyboard.inline_keyboard) if keyboard else []
+        # needpay_kb can already have appended the same button.
+        if any(button.web_app and button.web_app.url == extra.inline_keyboard[0][0].web_app.url
+               for row in rows for button in row):
+            return keyboard
+        return InlineKeyboardMarkup(rows + list(extra.inline_keyboard))
+    return wrapped
+
+
 def build_need_text(req) -> str:
     no = _display_no(req)
     lines = []
@@ -180,7 +223,7 @@ def build_need_text(req) -> str:
         lines.append(f"Оформил: {req['processed_by']}")
     lines.append("")
     lines.append(progress_block(req))
-    return "\n".join(lines)
+    return with_comment_preview("\n".join(lines), req)
 
 
 def build_full_caption(req) -> str:
@@ -200,11 +243,12 @@ def build_full_caption(req) -> str:
         lines.append(f"Оформил: {req['processed_by']}")
     lines.append("")
     lines.append(progress_block(req))
-    return "\n".join(lines)
+    return with_comment_preview("\n".join(lines), req, limit=980)
 
 
 # ---------- Кнопки платёжки ----------
 
+@with_comments
 def needpay_kb(req_id):
     return InlineKeyboardMarkup([[
         InlineKeyboardButton("📄 Запросить платёжку", callback_data=f"act:needpay:{req_id}")
@@ -261,6 +305,7 @@ def attach_kb(req_id):
 
 # ---------- Клавиатуры по ролям ----------
 
+@with_comments
 def kb_needpay_or_none(req):
     if req["status"] in ("получено", "отклонено"):
         return None
@@ -269,6 +314,7 @@ def kb_needpay_or_none(req):
     return needpay_kb(req["id"])
 
 
+@with_comments
 def kb_buyer(req):
     if req["status"] != "потребность":
         return None
@@ -285,6 +331,7 @@ def kb_buyer(req):
     ])
 
 
+@with_comments
 def kb_accountant(req):
     if req["status"] == "одобрено":
         return InlineKeyboardMarkup([[
@@ -292,6 +339,7 @@ def kb_accountant(req):
     return attach_kb(req["id"])
 
 
+@with_comments
 def kb_driver(req):
     rows = []
     if req["status"] == "оплачено":
@@ -300,6 +348,7 @@ def kb_driver(req):
     return InlineKeyboardMarkup(rows)
 
 
+@with_comments
 def kb_warehouse(req):
     if req["status"] == "в_пути":
         return InlineKeyboardMarkup([[
@@ -307,6 +356,7 @@ def kb_warehouse(req):
     return None
 
 
+@with_comments
 def kb_director_approve(req_id):
     return InlineKeyboardMarkup([[
         InlineKeyboardButton("🟢 Одобрить", callback_data=f"act:approve:{req_id}"),
@@ -325,6 +375,7 @@ def kb_buyer_rejected(req):
     ])
 
 
+@with_comments
 def kb_admin(req):
     if req["status"] in ("получено", "отклонено"):
         return None
@@ -349,6 +400,11 @@ MAX_CAPTION = 1024
 def _trim_caption(text: str) -> str:
     if len(text) <= MAX_CAPTION:
         return text
+    marker = "\n\n💬 Последний комментарий"
+    if marker in text:
+        body, footer = text.rsplit(marker, 1)
+        footer = marker + footer
+        return body[:MAX_CAPTION - len(footer) - 1] + "…" + footer
     return text[:MAX_CAPTION - 1] + "…"
 
 
@@ -395,17 +451,20 @@ async def refresh_all_cards(bot, req):
     )
     submitter_card_is_media = has_need_photo or is_direct_request
     submitter_text = build_full_caption(req) if is_direct_request else text
+    is_administrative = req["sector"] == config.ADMIN_SECTOR
+    submitter_can_view = (not is_administrative or is_director(req["submitted_by_id"])
+                          or is_accountant(req["submitted_by_id"]) or is_admin(req["submitted_by_id"]))
 
     # Карточка сотрудника (фото или текст)
-    if submitter_card_is_media and req.get("notify_message_id"):
+    if submitter_can_view and submitter_card_is_media and req.get("notify_message_id"):
         await _edit_caption(
             bot, req["submitted_by_id"], req["notify_message_id"], submitter_text, npkb)
-    else:
+    elif submitter_can_view:
         await _edit_text(
             bot, req["submitted_by_id"], req["notify_message_id"], submitter_text, npkb)
 
     # Карточки закупщиков (фото или текст)
-    bids = buyer_ids()
+    bids = [] if is_administrative else buyer_ids()
     buyer_msg_cols = ["buyer_msg_id", "buyer2_msg_id"]
     for i, bid in enumerate(bids):
         col = buyer_msg_cols[i] if i < len(buyer_msg_cols) else None
@@ -421,7 +480,8 @@ async def refresh_all_cards(bot, req):
         cap = build_full_caption(req)
         did = director_id()
         if did and req.get("director_msg_id"):
-            await _edit_caption(bot, did, req["director_msg_id"], cap, npkb)
+            director_kb = kb_director_approve(req["id"]) if req["status"] == "оформлено" else npkb
+            await _edit_caption(bot, did, req["director_msg_id"], cap, director_kb)
 
         acc_ids = accountant_ids()
         if req.get("accountant_msg_id") and len(acc_ids) > 0:
@@ -429,11 +489,11 @@ async def refresh_all_cards(bot, req):
         if req.get("accountant2_msg_id") and len(acc_ids) > 1:
             await _edit_caption(bot, acc_ids[1], req["accountant2_msg_id"], cap, kb_accountant(req))
 
-        if req.get("driver_msg_id"):
+        if not is_administrative and req.get("driver_msg_id"):
             drv = driver_ids()
             if drv:
                 await _edit_caption(bot, drv[0], req["driver_msg_id"], cap, kb_driver(req))
-        if req.get("warehouse_msg_id"):
+        if not is_administrative and req.get("warehouse_msg_id"):
             wh = warehouse_ids()
             if wh:
                 await _edit_caption(bot, wh[0], req["warehouse_msg_id"], cap, kb_warehouse(req))
@@ -517,10 +577,11 @@ async def publish_need(bot, *, sector: str, description: str, needed_by: str,
 
     try:
         if media:
-            m, fid = await _send_card(bot, submitter_id, media, text, is_document)
+            m, fid = await _send_card(bot, submitter_id, media, text, is_document,
+                                      reply_markup=kb_needpay_or_none(req))
             _remember_fid(fid)
         else:
-            m = await bot.send_message(submitter_id, text)
+            m = await bot.send_message(submitter_id, text, reply_markup=kb_needpay_or_none(req))
         db.attach_notify_message(request_id, m.message_id)
     except Exception:
         pass
@@ -528,10 +589,11 @@ async def publish_need(bot, *, sector: str, description: str, needed_by: str,
     if config.ADMIN_ID and submitter_id != config.ADMIN_ID:
         try:
             if media:
-                m, fid = await _send_card(bot, config.ADMIN_ID, media, text, is_document)
+                m, fid = await _send_card(bot, config.ADMIN_ID, media, text, is_document,
+                                          reply_markup=kb_admin(req))
                 _remember_fid(fid)
             else:
-                m = await bot.send_message(config.ADMIN_ID, text)
+                m = await bot.send_message(config.ADMIN_ID, text, reply_markup=kb_admin(req))
             db.set_admin_msg(request_id, m.message_id)
         except Exception:
             pass

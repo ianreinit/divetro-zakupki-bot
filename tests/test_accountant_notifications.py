@@ -123,7 +123,7 @@ class AccountantNotificationTests(unittest.IsolatedAsyncioTestCase):
         db.init_db()
         self.assertEqual(db.get_payment_notices(1)[0]["message_id"], 50)
         with sqlite3.connect(db.DB_PATH) as conn:
-            self.assertEqual(conn.execute("PRAGMA user_version").fetchone()[0], 5)
+            self.assertEqual(conn.execute("PRAGMA user_version").fetchone()[0], db.CURRENT_SCHEMA_VERSION)
             self.assertEqual(conn.execute("SELECT COUNT(*) FROM accountant_notifications").fetchone()[0], 0)
 
 

@@ -86,6 +86,7 @@ DB_PATH = os.getenv("DB_PATH", "zakupki.db")
 # Локально (без туннеля) можно оставить пустым — тогда /new покажет старый мастер.
 WEBAPP_URL = os.getenv("WEBAPP_URL", "")
 NOTIFYAPP_URL = urljoin(WEBAPP_URL, "notify") if WEBAPP_URL else ""
+COMMENTSAPP_URL = urljoin(WEBAPP_URL, "comments") if WEBAPP_URL else ""
 
 # Публичный HTTPS-адрес окна загрузки платёжки (pay.html) — бухгалтер прикрепляет
 # платёжку к заявке через окно, а не отдельным сообщением со скрепкой.

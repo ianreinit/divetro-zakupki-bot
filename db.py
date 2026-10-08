@@ -60,7 +60,7 @@ CREATE TABLE IF NOT EXISTS audit_log (
 """
 
 
-CURRENT_SCHEMA_VERSION = 5
+CURRENT_SCHEMA_VERSION = 6
 
 
 def _add_col(conn, table, column, col_type):
@@ -134,12 +134,34 @@ def _migrate_to_v5(conn):
     )""")
 
 
+def _migrate_to_v6(conn):
+    conn.execute("""CREATE TABLE IF NOT EXISTS request_comments (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        request_id INTEGER NOT NULL,
+        author_id INTEGER NOT NULL,
+        author_name TEXT NOT NULL,
+        author_role TEXT NOT NULL,
+        body TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        submission_id TEXT NOT NULL,
+        UNIQUE (request_id, author_id, submission_id)
+    )""")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_comments_request ON request_comments(request_id, id)")
+    conn.execute("""CREATE TABLE IF NOT EXISTS comment_deliveries (
+        comment_id INTEGER NOT NULL,
+        recipient_id INTEGER NOT NULL,
+        message_id INTEGER,
+        PRIMARY KEY (comment_id, recipient_id)
+    )""")
+
+
 _MIGRATIONS = [
     (1, _migrate_to_v1),
     (2, _migrate_to_v2),
     (3, _migrate_to_v3),
     (4, _migrate_to_v4),
     (5, _migrate_to_v5),
+    (6, _migrate_to_v6),
 ]
 
 
@@ -373,6 +395,65 @@ def set_need_photo(request_id: int, file_id: str, is_document: int):
         conn.execute(
             "UPDATE requests SET need_photo_file_id = ?, need_is_document = ? WHERE id = ?",
             (file_id, is_document, request_id))
+        conn.commit()
+
+
+def comment_summary(request_id):
+    with closing(sqlite3.connect(DB_PATH)) as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute("""SELECT *,
+            (SELECT COUNT(*) FROM request_comments WHERE request_id = ?) AS total
+            FROM request_comments WHERE request_id = ? ORDER BY id DESC LIMIT 1""",
+            (request_id, request_id)).fetchone()
+        return dict(row) if row else None
+
+
+def comment_author_ids(request_id):
+    with closing(sqlite3.connect(DB_PATH)) as conn:
+        return [row[0] for row in conn.execute(
+            "SELECT DISTINCT author_id FROM request_comments WHERE request_id = ?", (request_id,))]
+
+
+def list_comments(request_id, before=None, limit=50):
+    with closing(sqlite3.connect(DB_PATH)) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute("""SELECT * FROM request_comments
+            WHERE request_id = ? AND (? IS NULL OR id < ?) ORDER BY id DESC LIMIT ?""",
+            (request_id, before, before, limit)).fetchall()
+        return [dict(row) for row in reversed(rows)]
+
+
+def save_comment(request_id, author_id, author_name, author_role, body, submission_id, recipients):
+    with closing(sqlite3.connect(DB_PATH)) as conn:
+        conn.row_factory = sqlite3.Row
+        with conn:
+            conn.execute("BEGIN IMMEDIATE")
+            existing = conn.execute("""SELECT * FROM request_comments
+                WHERE request_id = ? AND author_id = ? AND submission_id = ?""",
+                (request_id, author_id, submission_id)).fetchone()
+            if existing:
+                return dict(existing)
+            cursor = conn.execute("""INSERT INTO request_comments
+                (request_id, author_id, author_name, author_role, body, created_at, submission_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?)""", (request_id, author_id, author_name, author_role,
+                body, datetime.now(config.TZ).isoformat(timespec="seconds"), submission_id))
+            comment_id = cursor.lastrowid
+            conn.executemany("INSERT INTO comment_deliveries (comment_id, recipient_id) VALUES (?, ?)",
+                             [(comment_id, uid) for uid in set(recipients) if uid != author_id])
+            return dict(conn.execute("SELECT * FROM request_comments WHERE id = ?", (comment_id,)).fetchone())
+
+
+def comment_deliveries(comment_id):
+    with closing(sqlite3.connect(DB_PATH)) as conn:
+        conn.row_factory = sqlite3.Row
+        return [dict(row) for row in conn.execute(
+            "SELECT * FROM comment_deliveries WHERE comment_id = ?", (comment_id,))]
+
+
+def mark_comment_delivered(comment_id, recipient_id, message_id):
+    with closing(sqlite3.connect(DB_PATH)) as conn:
+        conn.execute("UPDATE comment_deliveries SET message_id = ? WHERE comment_id = ? AND recipient_id = ?",
+                     (message_id, comment_id, recipient_id))
         conn.commit()
 
 
