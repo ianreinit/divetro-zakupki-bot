@@ -9,6 +9,7 @@ from datetime import datetime, time as dtime
 from telegram import (
     Update, InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo,
     BotCommand, MenuButtonWebApp, MenuButtonCommands,
+    InputMediaPhoto, InputMediaDocument,
 )
 from telegram.ext import (
     Application, CommandHandler, ConversationHandler, MessageHandler,
@@ -861,14 +862,41 @@ async def _act_needpay(query, context, req, req_id, uid, now):
     if already:
         return
     label = _requester_label(uid, req)
-    for aid in core.accountant_ids():
+    for i, aid in enumerate(core.accountant_ids()):
         try:
-            await context.bot.send_message(
+            original_id = req.get("accountant_msg_id" if i == 0 else "accountant2_msg_id")
+            message = await context.bot.send_message(
                 aid,
-                f"📄 По {core._display_no(req)} нужна платёжка.\nЗапросил: {label}.",
-                reply_markup=core.attach_kb(req_id))
+                core.payment_notice_text(req, label),
+                reply_markup=core.payment_notice_kb(req),
+                reply_to_message_id=original_id,
+                allow_sending_without_reply=True)
+            db.save_payment_notice(req_id, aid, message.message_id, label)
         except Exception as e:
             log.warning("Не уведомить бухгалтера %s о запросе платёжки: %s", aid, e)
+
+
+async def _act_openpay(query, context, req, req_id, uid, now):
+    if not core.is_accountant(uid):
+        await query.answer("Только бухгалтер.", show_alert=True)
+        return
+    notice = next((n for n in db.get_payment_notices(req_id)
+                   if n["chat_id"] == uid and n["message_id"] == query.message.message_id), None)
+    if notice is None:
+        await query.answer("Запрос не найден.", show_alert=True)
+        return
+    await query.answer()
+    if notice["expanded"]:
+        return
+    kb = core.payment_notice_kb(req, expanded=True)
+    if req.get("photo_file_id"):
+        media_type = InputMediaDocument if req.get("is_document") else InputMediaPhoto
+        await query.edit_message_media(
+            media=media_type(req["photo_file_id"], caption=core.payment_notice_caption(req)),
+            reply_markup=kb)
+    else:
+        await query.edit_message_text(core.build_full_caption(req), reply_markup=kb)
+    db.expand_payment_notice(req_id, uid, query.message.message_id)
 
 
 async def attach_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -928,6 +956,7 @@ async def attach_file_received(update: Update, context: ContextTypes.DEFAULT_TYP
     db.log_action(req_id, "платёжка", update.effective_user.id, update.effective_user.full_name)
     req = db.get_by_id(req_id)
     sent_to = await core.deliver_payment_to_pending(context.bot, req)
+    await core.refresh_all_cards(context.bot, req)
 
     who = f"\nОтправлена запросившим ({len(sent_to)})" if sent_to else "\nСохранена (запросов пока нет)"
     no = core._display_no(req)
@@ -1002,6 +1031,7 @@ _ACTION_HANDLERS = {
     "resubmit": _act_resubmit,
     "pay": _act_pay,
     "needpay": _act_needpay,
+    "openpay": _act_openpay,
     "ship": _act_ship,
     "receive": _act_receive,
 }

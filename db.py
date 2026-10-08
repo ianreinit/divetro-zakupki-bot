@@ -60,7 +60,7 @@ CREATE TABLE IF NOT EXISTS audit_log (
 """
 
 
-CURRENT_SCHEMA_VERSION = 3
+CURRENT_SCHEMA_VERSION = 4
 
 
 def _add_col(conn, table, column, col_type):
@@ -109,10 +109,22 @@ def _migrate_to_v3(conn):
     _add_col(conn, "requests", "buyer2_msg_id", "INTEGER")
 
 
+def _migrate_to_v4(conn):
+    conn.execute("""CREATE TABLE IF NOT EXISTS payment_notices (
+        request_id INTEGER NOT NULL,
+        chat_id INTEGER NOT NULL,
+        message_id INTEGER NOT NULL,
+        requester TEXT NOT NULL,
+        expanded INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (chat_id, message_id)
+    )""")
+
+
 _MIGRATIONS = [
     (1, _migrate_to_v1),
     (2, _migrate_to_v2),
     (3, _migrate_to_v3),
+    (4, _migrate_to_v4),
 ]
 
 
@@ -346,6 +358,29 @@ def set_need_photo(request_id: int, file_id: str, is_document: int):
         conn.execute(
             "UPDATE requests SET need_photo_file_id = ?, need_is_document = ? WHERE id = ?",
             (file_id, is_document, request_id))
+        conn.commit()
+
+
+def save_payment_notice(request_id, chat_id, message_id, requester):
+    with closing(sqlite3.connect(DB_PATH)) as conn:
+        conn.execute(
+            "INSERT INTO payment_notices (request_id, chat_id, message_id, requester) VALUES (?, ?, ?, ?)",
+            (request_id, chat_id, message_id, requester))
+        conn.commit()
+
+
+def get_payment_notices(request_id):
+    with closing(sqlite3.connect(DB_PATH)) as conn:
+        conn.row_factory = sqlite3.Row
+        return [dict(row) for row in conn.execute(
+            "SELECT * FROM payment_notices WHERE request_id = ?", (request_id,))]
+
+
+def expand_payment_notice(request_id, chat_id, message_id):
+    with closing(sqlite3.connect(DB_PATH)) as conn:
+        conn.execute(
+            "UPDATE payment_notices SET expanded = 1 WHERE request_id = ? AND chat_id = ? AND message_id = ?",
+            (request_id, chat_id, message_id))
         conn.commit()
 
 

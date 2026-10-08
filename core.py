@@ -144,6 +144,8 @@ def progress_block(req) -> str:
         lines.append(f"🟢 Одобрено — {_fmt_dt(req['approved_at'])}")
     if req.get("paid_at"):
         lines.append(f"🟥 Оплачено — {_fmt_dt(req['paid_at'])}")
+        lines.append("   📄 Платёжка прикреплена" if req.get("payment_file_id")
+                     else "   📄 Без платёжки")
     if req.get("shipped_at"):
         lines.append(f"🚚 В пути — {_fmt_dt(req['shipped_at'])}")
     if req.get("received_at"):
@@ -207,6 +209,48 @@ def needpay_kb(req_id):
     return InlineKeyboardMarkup([[
         InlineKeyboardButton("📄 Запросить платёжку", callback_data=f"act:needpay:{req_id}")
     ]])
+
+
+def payment_notice_text(req, requester):
+    title = "✅ Платёжка прикреплена" if req.get("payment_file_id") else "📄 Запрошена платёжка"
+    amount = f"{req['amount']:,.0f}".replace(",", " ") if req.get("amount") else "—"
+    purpose = req.get("description") or req.get("naryad") or "—"
+    lines = [title, "", f"Заявка: {_display_no(req)}",
+             f"Поставщик: {req.get('supplier') or '—'}", f"Сумма: {amount}",
+             f"Назначение: {purpose}", ""]
+    if req.get("paid_at"):
+        lines.append(f"🟥 Оплачено — {_fmt_dt(req['paid_at'])}")
+    else:
+        lines.append("Оплата ещё не отмечена")
+    lines.append(f"Запросил: {requester}")
+    return "\n".join(lines)[:4096]
+
+
+def payment_notice_kb(req, expanded=False):
+    rows = []
+    if not req.get("payment_file_id"):
+        rows.append([InlineKeyboardButton("📎 Прикрепить платёжку", callback_data=f"act:attach:{req['id']}")])
+    if not expanded:
+        rows.append([InlineKeyboardButton("🔎 Открыть заявку", callback_data=f"act:openpay:{req['id']}")])
+    return InlineKeyboardMarkup(rows) if rows else None
+
+
+def payment_notice_caption(req):
+    title = "✅ Платёжка прикреплена" if req.get("payment_file_id") else "📄 Запрошена платёжка"
+    return _trim_caption(title + "\n\n" + build_full_caption(req))
+
+
+async def refresh_payment_notices(bot, req):
+    for notice in db.get_payment_notices(req["id"]):
+        if not is_accountant(notice["chat_id"]):
+            continue
+        kb = payment_notice_kb(req, bool(notice["expanded"]))
+        if notice["expanded"] and req.get("photo_file_id"):
+            await _edit_caption(bot, notice["chat_id"], notice["message_id"],
+                                payment_notice_caption(req), kb)
+        else:
+            text = build_full_caption(req) if notice["expanded"] else payment_notice_text(req, notice["requester"])
+            await _edit_text(bot, notice["chat_id"], notice["message_id"], text, kb)
 
 
 def attach_kb(req_id):
@@ -336,6 +380,7 @@ async def _edit_text(bot, chat_id, msg_id, text, reply_markup):
 
 
 async def refresh_all_cards(bot, req):
+    await refresh_payment_notices(bot, req)
     text = build_need_text(req)
     npkb = kb_needpay_or_none(req)
     has_need_photo = bool(req.get("need_photo_file_id"))

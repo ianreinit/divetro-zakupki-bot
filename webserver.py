@@ -440,6 +440,7 @@ async def handle_attach_payment(request: web.Request) -> web.Response:
     db.log_action(req_id, "платёжка", uid, actor_name)
     req = db.get_by_id(req_id)
     await core.deliver_payment_to_pending(bot, req)
+    await core.refresh_all_cards(bot, req)
     return web.json_response({"ok": True})
 
 
