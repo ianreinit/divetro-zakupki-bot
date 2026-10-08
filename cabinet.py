@@ -109,6 +109,17 @@ async def data_view(request):
     data, uid, failure = await authenticate(request)
     if failure is not None: return failure
     view = data.get('view', 'tasks')
+    if view == 'notifications':
+        if not core.is_accountant(uid): return comments.error('not_allowed', 403)
+        try:
+            offset = int(data.get('offset', 0))
+            if offset < 0: raise ValueError
+        except (ValueError, TypeError): return comments.error('bad_request', 400)
+        rows = db.accountant_notification_history(uid, offset)
+        return web.json_response({'ok': True, 'items': [
+            {'id': r['id'], 'description': r['description'], 'created_at': r['created_at'],
+             'sent': bool(r['director_message_id'])} for r in rows[:40]],
+            'next_offset': offset + 40 if len(rows) > 40 else None})
     query = data.get('query', '')
     field = data.get('field', 'all')
     if not isinstance(query, str) or len(query) > 200 or field not in ('all', 'order', 'supplier'):
@@ -120,7 +131,7 @@ async def data_view(request):
     # Filter access before counting, searching or aggregating. Never truncate financial totals.
     rows = [r for r in db.list_all_requests(limit=-1) if comments.can_access(uid, r)]
     tasks = [{'key': k, 'label': TASKS[k], 'count': sum(matches(r, k, uid) for r in rows)} for k in task_keys(uid)]
-    response = {'ok': True, 'role': comments.user_role(uid), 'tasks': tasks}
+    response = {'ok': True, 'role': comments.user_role(uid), 'tasks': tasks, 'notifications': core.is_accountant(uid)}
     if view == 'tasks':
         key = data.get('task') or tasks[0]['key']
         if key not in task_keys(uid): return comments.error('bad_request', 400)

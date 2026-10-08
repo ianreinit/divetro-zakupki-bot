@@ -56,7 +56,7 @@ class AccountantNotificationTests(unittest.IsolatedAsyncioTestCase):
         response = await self.client.post("/notify_payment", json=payload)
         self.assertEqual(response.status, 200)
         self.assertTrue((await response.json())["ok"])
-        call = self.bot.send_message.call_args
+        call = self.bot.send_message.call_args_list[0]
         self.assertEqual(call.args[0], 30)
         self.assertIn("🟥 Оплачено\nБухгалтер: Анна", call.args[1])
         self.assertIn(payload["description"], call.args[1])
@@ -66,7 +66,34 @@ class AccountantNotificationTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(row, (20, 100, payload["description"]))
         response = await self.client.post("/notify_payment", json=payload)
         self.assertEqual(response.status, 200)
-        self.bot.send_message.assert_awaited_once()
+        self.assertEqual(self.bot.send_message.await_count, 2)
+        self.assertEqual(self.bot.send_message.call_args_list[1].args[0], 20)
+
+    async def test_copy_retry_does_not_resend_to_director(self):
+        payload = self.payload()
+        self.bot.send_message.side_effect = [SimpleNamespace(message_id=101), RuntimeError('offline')]
+        response = await self.client.post('/notify_payment', json=payload)
+        self.assertEqual((await response.json())['error'], 'copy_failed')
+        self.bot.send_message.side_effect = None
+        response = await self.client.post('/notify_payment', json=payload)
+        self.assertEqual(response.status, 200)
+        self.assertEqual([c.args[0] for c in self.bot.send_message.call_args_list], [30,20,20])
+        response = await self.client.post('/cabinet_data', json={**payload, 'view':'notifications'})
+        history = await response.json()
+        self.assertEqual(len(history['items']),1)
+        self.assertTrue(history['items'][0]['sent'])
+        response = await self.client.post('/cabinet_data', json={**self.payload(99), 'view':'notifications'})
+        self.assertEqual(response.status,403)
+
+    async def test_history_includes_old_records_and_excludes_other_accountants(self):
+        mine = db.create_accountant_notification(20, 'Анна', 'Ранее отправлено', 30, str(uuid4()))
+        db.mark_accountant_notification_sent(mine['id'], 88)
+        db.create_accountant_notification(21, 'Другой', 'Чужое', 30, str(uuid4()))
+        response = await self.client.post('/cabinet_data', json={**self.payload(), 'view':'notifications'})
+        items = (await response.json())['items']
+        self.assertEqual([r['description'] for r in items], ['Ранее отправлено'])
+        self.assertTrue(items[0]['sent'])
+        self.bot.send_message.assert_not_awaited()
 
     async def test_rejects_non_accountant_and_invalid_signature(self):
         response = await self.client.post("/notify_payment", json=self.payload(uid=99))

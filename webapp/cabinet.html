@@ -6,7 +6,7 @@
 </style></head><body><main>
 <header><div><div class="brand">DIVETRO</div><h1>Личный кабинет</h1><div id="role" class="hint">Загрузка…</div></div><button id="refresh" aria-label="Обновить">↻</button></header>
 <nav aria-label="Разделы"><button data-view="tasks" aria-pressed="true">Мои задачи</button><button data-view="search" aria-pressed="false">Поиск</button><button data-view="analytics" aria-pressed="false">Аналитика</button></nav>
-<div id="controls"></div><p id="error" role="alert" hidden></p><p id="status" role="status"></p><section id="content"></section><button id="more" class="wide" hidden>Показать ещё</button>
+<button id="notifications" class="wide" hidden>Отправленные уведомления</button><div id="controls"></div><p id="error" role="alert" hidden></p><p id="status" role="status"></p><section id="content"></section><button id="more" class="wide" hidden>Показать ещё</button>
 </main><div id="child" hidden><div id="childbar"><button id="return">← К заявке</button></div><iframe id="frame" title="Действие по заявке"></iframe></div>
 <script>
 const tg=window.Telegram?.WebApp;tg?.ready();tg?.expand();
@@ -28,6 +28,11 @@ function controls(d){
 async function load(append=false){
  const ticket=++seq;$('error').hidden=true;$('status').textContent='Загрузка…';$('more').hidden=true;
  try{const d=await api('cabinet_data',{...state,offset:append?next:0});if(ticket!==seq)return;
+ if(state.view==='notifications'){
+ if(!append){$('controls').innerHTML='<h2>Мои уведомления</h2><div class="hint">История отправки директору</div>';$('content').innerHTML='<div id="items"></div>';}
+ $('items').insertAdjacentHTML('beforeend',d.items.map(n=>`<div class="panel"><div style="white-space:pre-wrap">${esc(n.description)}</div><div class="hint small">${esc(new Date(n.created_at).toLocaleString('ru-RU'))}</div><div class="state">${n.sent?'✓ Отправлено директору · оплачено':'Не доставлено директору'}</div></div>`).join('')||'<div class="panel">Уведомлений пока нет.</div>');
+ next=d.next_offset;$('more').hidden=next===null;$('status').textContent='';return;}
+ $('notifications').hidden=!d.notifications;
  $('role').textContent=d.role;state.task=d.task||state.task;next=d.next_offset;
  if(!append){$('controls').innerHTML=controls(d);document.querySelector('#searchform')?.addEventListener('submit',e=>{e.preventDefault();state.query=$('query').value;state.field=$('field').value;state.drill=null;load();});
  let summary=state.view==='tasks'?`<div class="hint">Заявок: ${d.count}</div>`:`<div class="panel"><div class="hint">${state.view==='analytics'?date(d.start)+' — '+date(d.end)+' · по дате оплаты':'За всё время · оплачено'}</div><div class="total">${money(state.view==='analytics'?d.total:d.paid_total)}</div><div class="hint">${state.view==='search'?'Ожидают оплаты: '+money(d.waiting_total):'Уведомления в свободной форме не входят в расходы'}</div></div>`;
@@ -54,5 +59,6 @@ document.addEventListener('click',async e=>{const b=e.target.closest('button');i
  else if(b.dataset.form)openForm(b.dataset.form);
  else if(b.id==='openchat'&&!busy){busy=true;b.disabled=true;try{await api('cabinet_open',{req:selected});$('status').textContent='Карточка отправлена в ваш чат с ботом.';tg?.close();}catch(e){failure(e);}finally{busy=false;b.disabled=false;}}
 });
+$('notifications').onclick=()=>{state.view='notifications';selected=null;state.drill=null;document.querySelectorAll('[data-view]').forEach(b=>b.setAttribute('aria-pressed','false'));load();};
 $('refresh').onclick=()=>selected?detail(selected):load();$('more').onclick=()=>load(true);load();
 </script></body></html>

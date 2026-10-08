@@ -544,6 +544,15 @@ async def handle_notify_payment(request: web.Request) -> web.Response:
                 log.warning("Не удалось доставить уведомление об оплате %s", notice["id"])
                 return web.json_response({"ok": False, "error": "send_failed"}, status=502)
             db.mark_accountant_notification_sent(notice["id"], message.message_id)
+        if not notice.get("accountant_message_id"):
+            text = (f"✅ Вы отправили уведомление директору\n\n{notice['description']}\n\n"
+                    f"🟥 Оплачено\nОтправлено: {core._fmt_dt(notice['created_at'])}")
+            try:
+                message = await request.app["bot"].send_message(uid, text)
+            except Exception:
+                log.warning("Не доставлена копия уведомления %s бухгалтеру", notice["id"])
+                return web.json_response({"ok": False, "error": "copy_failed"}, status=502)
+            db.mark_accountant_copy_sent(notice["id"], message.message_id)
     return web.json_response({"ok": True})
 
 

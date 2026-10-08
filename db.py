@@ -60,7 +60,7 @@ CREATE TABLE IF NOT EXISTS audit_log (
 """
 
 
-CURRENT_SCHEMA_VERSION = 7
+CURRENT_SCHEMA_VERSION = 8
 
 
 def _add_col(conn, table, column, col_type):
@@ -159,6 +159,10 @@ def _migrate_to_v7(conn):
     _add_col(conn, "requests", "expense_category", "TEXT")
 
 
+def _migrate_to_v8(conn):
+    _add_col(conn, "accountant_notifications", "accountant_message_id", "INTEGER")
+
+
 _MIGRATIONS = [
     (1, _migrate_to_v1),
     (2, _migrate_to_v2),
@@ -167,6 +171,7 @@ _MIGRATIONS = [
     (5, _migrate_to_v5),
     (6, _migrate_to_v6),
     (7, _migrate_to_v7),
+    (8, _migrate_to_v8),
 ]
 
 
@@ -700,3 +705,18 @@ def report(sector, period_start: str):
                 (period_start,),
             )
         return cur.fetchall()
+
+
+def mark_accountant_copy_sent(notification_id, message_id):
+    with closing(sqlite3.connect(DB_PATH)) as conn:
+        conn.execute("UPDATE accountant_notifications SET accountant_message_id = ? WHERE id = ?",
+                     (message_id, notification_id))
+        conn.commit()
+
+
+def accountant_notification_history(uid, offset=0):
+    with closing(sqlite3.connect(DB_PATH)) as conn:
+        conn.row_factory = _dict_factory
+        return conn.execute("""SELECT id, description, created_at, director_message_id,
+            accountant_message_id FROM accountant_notifications WHERE accountant_id = ?
+            ORDER BY id DESC LIMIT 41 OFFSET ?""", (uid, offset)).fetchall()
