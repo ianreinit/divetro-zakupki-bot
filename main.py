@@ -840,15 +840,6 @@ async def _act_pay(query, context, req, req_id, uid, now):
     await core.notify_paid(context.bot, req)
     if req["sector"] != config.ADMIN_SECTOR:
         await core.send_driver_card(context.bot, req)
-    no = core._display_no(req)
-    for aid in core.accountant_ids():
-        try:
-            await context.bot.send_message(
-                aid,
-                f"📎 По {no} можно прикрепить платёжку.",
-                reply_markup=core.attach_kb(req_id))
-        except Exception as e:
-            log.warning("Не удалось отправить кнопку платёжки бухгалтеру %s: %s", aid, e)
 
 
 async def _act_needpay(query, context, req, req_id, uid, now):
