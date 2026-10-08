@@ -31,7 +31,8 @@ class AccountantNotificationTests(unittest.IsolatedAsyncioTestCase):
             p.start()
         db.init_db()
         self.bot = SimpleNamespace(send_message=AsyncMock(return_value=SimpleNamespace(message_id=100)),
-                                   set_chat_menu_button=AsyncMock())
+                                   set_chat_menu_button=AsyncMock(), set_my_commands=AsyncMock(),
+                                   delete_my_commands=AsyncMock())
         self.client = TestClient(TestServer(webserver.build_web_app(self.bot)))
         await self.client.start_server()
 
@@ -114,6 +115,18 @@ class AccountantNotificationTests(unittest.IsolatedAsyncioTestCase):
         response = await self.client.get("/notify")
         self.assertEqual(response.status, 200)
         self.assertIn("Отправить директору", await response.text())
+
+    async def test_accountant_start_and_new_offer_only_notification_and_request(self):
+        update = SimpleNamespace(effective_user=SimpleNamespace(id=20, full_name="Анна"),
+                                 message=SimpleNamespace(reply_text=AsyncMock()))
+        context = SimpleNamespace(bot=self.bot, user_data={})
+        with patch.object(config, "NOTIFYAPP_URL", "https://example.test/notify"), \
+                patch.object(config, "BUYER_REQUEST_URL", "https://example.test/buyer_request_form"):
+            for handler in (main.start, main.new_request, main.new_wizard):
+                await handler(update, context)
+                kb = update.message.reply_text.call_args.kwargs["reply_markup"]
+                self.assertEqual([row[0].text for row in kb.inline_keyboard], ["Уведомить", "📝 Новая заявка"])
+                self.assertEqual(kb.inline_keyboard[1][0].web_app.url, config.BUYER_REQUEST_URL)
 
     async def test_migration_from_v4_preserves_existing_notices(self):
         db.save_payment_notice(1, 20, 50, "Иван")

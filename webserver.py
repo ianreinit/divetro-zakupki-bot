@@ -395,7 +395,7 @@ async def handle_buyer_request_submit(request: web.Request) -> web.Response:
     except (ValueError, KeyError):
         return web.json_response({"ok": False, "error": "no_user"}, status=403)
 
-    if not (core.is_buyer(uid) or core.is_driver(uid) or core.is_admin(uid)):
+    if not (core.is_buyer(uid) or core.is_driver(uid) or core.is_admin(uid) or core.is_accountant(uid)):
         return web.json_response({"ok": False, "error": "not_buyer"}, status=403)
 
     supplier = fields.get("supplier", "").strip()

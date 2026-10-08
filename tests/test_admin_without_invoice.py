@@ -138,6 +138,16 @@ class AdminWithoutInvoiceTests(unittest.IsolatedAsyncioTestCase):
                     naryad="", submitter_id=uid, submitter_name="Name")
         self.assertIsNone(db.get_by_id(1))
 
+    async def test_accountant_can_create_regular_request_for_director_approval(self):
+        response = await self.client.post("/buyer_request_submit", data=self.form(
+            uid=20, file=("invoice.pdf", "application/pdf"), purpose="Наряд 125"))
+        self.assertEqual(response.status, 200, await response.text())
+        req = db.get_by_id(1)
+        self.assertEqual(req["submitted_by_id"], 20)
+        self.assertEqual(req["status"], "оформлено")
+        self.assertTrue(req["director_msg_id"])
+        self.assertIsNone(req["accountant_msg_id"])
+
     async def test_director_menu_and_wizard_skip(self):
         user = SimpleNamespace(id=30, full_name="Директор")
         update = SimpleNamespace(effective_user=user, message=SimpleNamespace(reply_text=AsyncMock(), text="3000"))

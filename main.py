@@ -9,7 +9,7 @@ from datetime import datetime, time as dtime
 
 from telegram import (
     Update, InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo,
-    BotCommand, MenuButtonWebApp, MenuButtonCommands,
+    BotCommand, BotCommandScopeChat, MenuButtonWebApp, MenuButtonCommands,
     InputMediaPhoto, InputMediaDocument,
 )
 from telegram.ext import (
@@ -47,6 +47,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     db.upsert_person(user.id, user.full_name)
     person = db.get_person(user.id)
     await apply_menu(context.bot, user.id)
+
+    if core.is_accountant(user.id):
+        await update.message.reply_text("Выберите действие:", reply_markup=accountant_actions())
+        return
 
     role = person["role"] if person else None
     if may_submit(user.id):
@@ -103,11 +107,25 @@ async def whoami(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ---------- Мастер подачи потребности (сотрудник) ----------
 
+def accountant_actions():
+    rows = []
+    if config.NOTIFYAPP_URL:
+        rows.append([InlineKeyboardButton("Уведомить", web_app=WebAppInfo(config.NOTIFYAPP_URL))])
+    rows.append([InlineKeyboardButton("📝 Новая заявка", web_app=WebAppInfo(config.BUYER_REQUEST_URL))
+                 if config.BUYER_REQUEST_URL else InlineKeyboardButton(
+                     "📝 Новая заявка", callback_data="wiz:buyreq")])
+    return InlineKeyboardMarkup(rows)
+
+
 async def new_wizard(update: Update, context: ContextTypes.DEFAULT_TYPE):
     db.upsert_person(update.effective_user.id, update.effective_user.full_name)
     if not may_submit(update.effective_user.id):
         await update.message.reply_text(NOT_ALLOWED_MSG)
         return ConversationHandler.END
+
+    if core.is_accountant(update.effective_user.id):
+        await update.message.reply_text("Выберите действие:", reply_markup=accountant_actions())
+        return ORDER_NO
 
     if core.is_admin(update.effective_user.id):
         keyboard = [
@@ -158,6 +176,10 @@ async def new_request(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not may_submit(update.effective_user.id):
         await update.message.reply_text(NOT_ALLOWED_MSG)
         return ConversationHandler.END
+
+    if core.is_accountant(update.effective_user.id):
+        await update.message.reply_text("Выберите действие:", reply_markup=accountant_actions())
+        return ORDER_NO
 
     if core.is_admin(update.effective_user.id):
         buttons = []
@@ -262,14 +284,17 @@ async def wiz_type_chosen(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if choice == "buyreq":
         if not (core.is_buyer(query.from_user.id) or core.is_driver(query.from_user.id)
-                or core.is_admin(query.from_user.id)):
+                or core.is_admin(query.from_user.id) or core.is_accountant(query.from_user.id)):
             await query.edit_message_text(
-                "Эта функция доступна только закупщику, водителю или администратору.")
+                "Эта функция доступна бухгалтеру, закупщику, водителю или администратору.")
             return ConversationHandler.END
         context.user_data["sector"] = config.SECTORS[0]
         await query.edit_message_text("📝 Новая заявка\n\nПоставщик?")
         return ADM_SUPPLIER
 
+    if core.is_accountant(query.from_user.id):
+        await query.edit_message_text("Выберите действие:", reply_markup=accountant_actions())
+        return ORDER_NO
     context.user_data["sector"] = config.SECTORS[0]
     await query.edit_message_text("Введите сток или номер заказа:")
     return ORDER_NO
@@ -1267,11 +1292,15 @@ async def apply_menu(bot, user_id: int):
             await bot.set_chat_menu_button(
                 chat_id=user_id,
                 menu_button=MenuButtonWebApp(text="Уведомить", web_app=WebAppInfo(config.NOTIFYAPP_URL)))
+            await bot.set_my_commands([BotCommand("new", "Новая заявка")],
+                                      scope=BotCommandScopeChat(chat_id=user_id))
         elif config.WEBAPP_URL and may_submit(user_id):
+            await bot.delete_my_commands(scope=BotCommandScopeChat(chat_id=user_id))
             await bot.set_chat_menu_button(
                 chat_id=user_id,
                 menu_button=MenuButtonWebApp(text="Потребность", web_app=WebAppInfo(config.WEBAPP_URL)))
         else:
+            await bot.delete_my_commands(scope=BotCommandScopeChat(chat_id=user_id))
             await bot.set_chat_menu_button(chat_id=user_id, menu_button=MenuButtonCommands())
     except Exception as e:
         log.warning("Не удалось обновить меню пользователя %s: %s", user_id, e)
