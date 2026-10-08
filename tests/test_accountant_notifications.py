@@ -103,13 +103,14 @@ class AccountantNotificationTests(unittest.IsolatedAsyncioTestCase):
     async def test_menu_only_changes_for_accountant(self):
         with patch.object(config, "NOTIFYAPP_URL", "https://example.test/divetro/notify"), \
                 patch.object(config, "WEBAPP_URL", "https://example.test/divetro/form"), \
-                patch.object(main, "may_submit", return_value=True):
+                patch.object(main.cabinet, "allowed", return_value=True), \
+                patch.object(config, "CABINET_URL", "https://example.test/divetro/cabinet"):
             await main.apply_menu(self.bot, 20)
             menu = self.bot.set_chat_menu_button.call_args.kwargs["menu_button"]
             self.assertEqual(menu.text, "Уведомить")
             self.assertEqual(menu.web_app.url, "https://example.test/divetro/notify")
             await main.apply_menu(self.bot, 99)
-            self.assertEqual(self.bot.set_chat_menu_button.call_args.kwargs["menu_button"].text, "Потребность")
+            self.assertEqual(self.bot.set_chat_menu_button.call_args.kwargs["menu_button"].text, "Личный кабинет")
 
     async def test_form_is_available(self):
         response = await self.client.get("/notify")
@@ -121,11 +122,12 @@ class AccountantNotificationTests(unittest.IsolatedAsyncioTestCase):
                                  message=SimpleNamespace(reply_text=AsyncMock()))
         context = SimpleNamespace(bot=self.bot, user_data={})
         with patch.object(config, "NOTIFYAPP_URL", "https://example.test/notify"), \
-                patch.object(config, "BUYER_REQUEST_URL", "https://example.test/buyer_request_form"):
+                patch.object(config, "BUYER_REQUEST_URL", "https://example.test/buyer_request_form"), \
+                patch.object(config, "CABINET_URL", "https://example.test/cabinet"):
             for handler in (main.start, main.new_request, main.new_wizard):
                 await handler(update, context)
                 kb = update.message.reply_text.call_args.kwargs["reply_markup"]
-                self.assertEqual([row[0].text for row in kb.inline_keyboard], ["Уведомить", "📝 Новая заявка"])
+                self.assertEqual([row[0].text for row in kb.inline_keyboard], ["Уведомить", "📝 Новая заявка", "Личный кабинет"])
                 self.assertEqual(kb.inline_keyboard[1][0].web_app.url, config.BUYER_REQUEST_URL)
 
     async def test_migration_from_v4_preserves_existing_notices(self):

@@ -21,6 +21,7 @@ import config
 import core
 import db
 import webserver
+import cabinet
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("zakupki-bot")
@@ -68,9 +69,14 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             new_hint = "новую потребность, новую или административную заявку"
         else:
             new_hint = "подать потребность"
+        if config.CABINET_URL:
+            rows = list(kb.inline_keyboard) if kb else []
+            rows.append([InlineKeyboardButton("Личный кабинет", web_app=WebAppInfo(config.CABINET_URL))])
+            kb = InlineKeyboardMarkup(rows)
         await update.message.reply_text(
             f"Привет, {user.first_name}! Я бот закупок.\n{sector_line}{role_line}\n"
             f"📋 /new — {new_hint}\n"
+            "🏠 /cabinet — личный кабинет\n"
             "📋 /list — заявки\n"
             "📋 /my — мои заявки",
             reply_markup=kb,
@@ -100,6 +106,17 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 pass
 
 
+async def cabinet_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not cabinet.allowed(update.effective_user.id):
+        await update.message.reply_text(NOT_ALLOWED_MSG)
+        return
+    if not config.CABINET_URL:
+        await update.message.reply_text("Кабинет пока не настроен.")
+        return
+    await update.message.reply_text("Задачи, поиск и расходы:", reply_markup=InlineKeyboardMarkup([[
+        InlineKeyboardButton("Личный кабинет", web_app=WebAppInfo(config.CABINET_URL))]]))
+
+
 async def whoami(update: Update, context: ContextTypes.DEFAULT_TYPE):
     u = update.effective_user
     await update.message.reply_text(f"Ваш Telegram ID: {u.id}\nИмя: {u.full_name}")
@@ -114,6 +131,8 @@ def accountant_actions():
     rows.append([InlineKeyboardButton("📝 Новая заявка", web_app=WebAppInfo(config.BUYER_REQUEST_URL))
                  if config.BUYER_REQUEST_URL else InlineKeyboardButton(
                      "📝 Новая заявка", callback_data="wiz:buyreq")])
+    if config.CABINET_URL:
+        rows.append([InlineKeyboardButton("Личный кабинет", web_app=WebAppInfo(config.CABINET_URL))])
     return InlineKeyboardMarkup(rows)
 
 
@@ -1314,13 +1333,13 @@ async def apply_menu(bot, user_id: int):
             await bot.set_chat_menu_button(
                 chat_id=user_id,
                 menu_button=MenuButtonWebApp(text="Уведомить", web_app=WebAppInfo(config.NOTIFYAPP_URL)))
-            await bot.set_my_commands([BotCommand("new", "Новая заявка")],
+            await bot.set_my_commands([BotCommand("cabinet", "Личный кабинет"), BotCommand("new", "Новая заявка")],
                                       scope=BotCommandScopeChat(chat_id=user_id))
-        elif config.WEBAPP_URL and may_submit(user_id):
+        elif config.CABINET_URL and cabinet.allowed(user_id):
             await bot.delete_my_commands(scope=BotCommandScopeChat(chat_id=user_id))
             await bot.set_chat_menu_button(
                 chat_id=user_id,
-                menu_button=MenuButtonWebApp(text="Потребность", web_app=WebAppInfo(config.WEBAPP_URL)))
+                menu_button=MenuButtonWebApp(text="Личный кабинет", web_app=WebAppInfo(config.CABINET_URL)))
         else:
             await bot.delete_my_commands(scope=BotCommandScopeChat(chat_id=user_id))
             await bot.set_chat_menu_button(chat_id=user_id, menu_button=MenuButtonCommands())
@@ -1622,6 +1641,7 @@ def build_application() -> Application:
     )
 
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("cabinet", cabinet_command))
     app.add_handler(CommandHandler("id", whoami))
     app.add_handler(employee_conv)
     app.add_handler(buyer_conv)
@@ -1658,6 +1678,7 @@ async def run_all():
 
         try:
             await app.bot.set_my_commands([
+                BotCommand("cabinet", "Личный кабинет"),
                 BotCommand("new", "Подать потребность"),
                 BotCommand("list", "Заявки"),
                 BotCommand("my", "Мои заявки"),
@@ -1666,8 +1687,11 @@ async def run_all():
         except Exception as e:
             log.warning("Не удалось настроить меню/команды: %s", e)
 
-        for accountant_id in core.accountant_ids():
-            await apply_menu(app.bot, accountant_id)
+        menu_ids = {p['user_id'] for p in db.list_people()}
+        menu_ids.update([config.ADMIN_ID, *core.director_ids(), *core.accountant_ids(),
+                         *core.buyer_ids(), *core.driver_ids(), *core.warehouse_ids()])
+        for uid in sorted(menu_ids - {0}):
+            await apply_menu(app.bot, uid)
 
         if config.ADMIN_ID:
             app.job_queue.run_monthly(

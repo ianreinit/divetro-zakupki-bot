@@ -30,6 +30,7 @@ import core
 import db
 import comments
 import payment_categories
+import cabinet
 
 log = logging.getLogger("zakupki-web")
 
@@ -552,6 +553,7 @@ def build_web_app(bot) -> web.Application:
     app["notification_lock"] = asyncio.Lock()
     comments.register(app, verify_init_data)
     payment_categories.register(app)
+    cabinet.register(app)
     app.router.add_get("/notify", handle_notify_form)
     app.router.add_get("/admin_request", handle_admin_request_form)
     app.router.add_post("/admin_request_submit", handle_admin_request_submit)
