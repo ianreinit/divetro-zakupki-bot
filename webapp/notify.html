@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Уведомить директора</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<style>
+* { box-sizing: border-box; }
+body { margin: 0; padding: 24px 16px; font: 16px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  background: var(--tg-theme-secondary-bg-color, #f2f2f7); color: var(--tg-theme-text-color, #1c1c1e); }
+main { max-width: 520px; margin: auto; }
+h1 { font-size: 23px; line-height: 1.25; margin: 0 0 12px; }
+p { color: var(--tg-theme-hint-color, #696970); }
+label { display: block; margin: 28px 0 8px; font-weight: 600; }
+input { width: 100%; padding: 15px; border: 1px solid #8886; border-radius: 12px; font: inherit;
+  color: inherit; background: var(--tg-theme-bg-color, #fff); }
+input:focus { outline: 2px solid var(--tg-theme-button-color, #2481cc); outline-offset: 2px; }
+button { width: 100%; padding: 16px; margin-top: 24px; border: 0; border-radius: 12px; font: inherit;
+  font-weight: 600; background: var(--tg-theme-button-color, #2481cc); color: var(--tg-theme-button-text-color, #fff); }
+button:disabled { opacity: .55; }
+#error { color: #c63232; }
+[hidden] { display: none !important; }
+</style>
+</head>
+<body>
+<main>
+  <section id="entry">
+    <h1>Уведомить директора об оплате</h1>
+    <p>Сообщите об уже оплаченном платеже одной строкой.</p>
+    <form id="form">
+      <label for="description">Описание платежа</label>
+      <input id="description" type="text" maxlength="500" required
+        placeholder="Orange — 1 250 лей, интернет за октябрь">
+      <p id="error" role="alert" hidden></p>
+      <button id="submit" type="submit" disabled>Отправить директору</button>
+    </form>
+  </section>
+  <section id="success" role="status" hidden>
+    <h1>✅ Уведомление отправлено</h1>
+    <p>Директор получил сообщение со статусом «Оплачено».</p>
+    <button id="close" type="button">Закрыть</button>
+  </section>
+</main>
+<script>
+const tg = window.Telegram?.WebApp;
+tg?.ready(); tg?.expand();
+const field = document.getElementById('description');
+const submit = document.getElementById('submit');
+const error = document.getElementById('error');
+let submissionId = crypto.randomUUID();
+let submittedText = null;
+field.addEventListener('input', () => { submit.disabled = !field.value.trim(); });
+document.getElementById('form').addEventListener('submit', async (event) => {
+  event.preventDefault();
+  const description = field.value.trim();
+  if (!description || submit.disabled) return;
+  if (submittedText !== null && submittedText !== description) submissionId = crypto.randomUUID();
+  submittedText = description;
+  submit.disabled = true; field.disabled = true; error.hidden = true;
+  submit.textContent = 'Отправляю…';
+  const messages = {
+    auth_failed: 'Откройте форму через кнопку «Уведомить» в боте.',
+    not_allowed: 'Уведомлять директора может только бухгалтер.',
+    no_director: 'Директор пока не назначен. Обратитесь к администратору.',
+    description_required: 'Введите описание платежа: от 1 до 500 символов.',
+    send_failed: 'Не удалось доставить сообщение директору. Попробуйте ещё раз.',
+    changed_request: 'Описание изменилось. Закройте и откройте форму заново.'
+  };
+  try {
+    const response = await fetch('notify_payment', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ initData: tg?.initData || '', description, submission_id: submissionId })
+    });
+    const result = await response.json();
+    if (!result.ok) throw new Error(messages[result.error] || 'Не удалось отправить. Попробуйте ещё раз.');
+    document.getElementById('entry').hidden = true;
+    document.getElementById('success').hidden = false;
+    tg?.HapticFeedback?.notificationOccurred('success');
+  } catch (e) {
+    error.textContent = e.message || 'Сеть недоступна. Попробуйте ещё раз.';
+    error.hidden = false; field.disabled = false; submit.disabled = false;
+    submit.textContent = 'Отправить директору';
+  }
+});
+document.getElementById('close').addEventListener('click', () => tg?.close());
+</script>
+</body>
+</html>

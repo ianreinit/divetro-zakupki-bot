@@ -9,6 +9,7 @@
 Сервер слушает локально (config.WEB_HOST:WEB_PORT); наружу по HTTPS его отдаёт
 nginx. Запускается в общем событийном цикле рядом с ботом (см. main.py).
 """
+import asyncio
 import hashlib
 import hmac
 import json
@@ -18,6 +19,7 @@ import time
 from datetime import datetime
 from io import BytesIO
 from urllib.parse import parse_qsl
+from uuid import UUID
 
 from aiohttp import web
 from telegram import InputFile
@@ -33,6 +35,7 @@ FORM_HTML = os.path.join(HERE, "webapp", "form.html")
 PAY_HTML = os.path.join(HERE, "webapp", "pay.html")
 BUYER_FORM_HTML = os.path.join(HERE, "webapp", "buyer_form.html")
 BUYER_REQUEST_FORM_HTML = os.path.join(HERE, "webapp", "buyer_request_form.html")
+NOTIFY_HTML = os.path.join(HERE, "webapp", "notify.html")
 
 MAX_FILE_BYTES = 15 * 1024 * 1024
 
@@ -444,9 +447,61 @@ async def handle_attach_payment(request: web.Request) -> web.Response:
     return web.json_response({"ok": True})
 
 
+async def handle_notify_form(request: web.Request) -> web.Response:
+    return web.FileResponse(NOTIFY_HTML)
+
+
+async def handle_notify_payment(request: web.Request) -> web.Response:
+    try:
+        data = await request.json()
+        if not isinstance(data, dict) or not isinstance(data.get("initData"), str):
+            raise ValueError
+        init = verify_init_data(data["initData"], config.BOT_TOKEN)
+        if init is None:
+            return web.json_response({"ok": False, "error": "auth_failed"}, status=403)
+        user = json.loads(init.get("user", "{}"))
+        uid = int(user["id"])
+    except (ValueError, TypeError, KeyError):
+        return web.json_response({"ok": False, "error": "bad_request"}, status=400)
+    if not core.is_accountant(uid):
+        return web.json_response({"ok": False, "error": "not_allowed"}, status=403)
+    description = data.get("description")
+    if not isinstance(description, str):
+        return web.json_response({"ok": False, "error": "description_required"}, status=400)
+    description = " ".join(description.split())
+    if not description or len(description) > 500:
+        return web.json_response({"ok": False, "error": "description_required"}, status=400)
+    try:
+        submission_id = str(UUID(data.get("submission_id", "")))
+    except (ValueError, TypeError, AttributeError):
+        return web.json_response({"ok": False, "error": "bad_request"}, status=400)
+    director_id = core.director_id()
+    if not director_id:
+        return web.json_response({"ok": False, "error": "no_director"}, status=409)
+    name = " ".join(p for p in [user.get("first_name"), user.get("last_name")] if p) or str(uid)
+    async with request.app["notification_lock"]:
+        notice = db.create_accountant_notification(uid, name, description, director_id, submission_id)
+        if notice["description"] != description:
+            return web.json_response({"ok": False, "error": "changed_request"}, status=409)
+        if not notice["director_message_id"]:
+            text = (f"💳 Уведомление об оплате\n\n{notice['description']}\n\n"
+                    f"🟥 Оплачено\nБухгалтер: {notice['accountant_name']}\n"
+                    f"Отправлено: {core._fmt_dt(notice['created_at'])}")
+            try:
+                message = await request.app["bot"].send_message(notice["director_id"], text)
+            except Exception:
+                log.warning("Не удалось доставить уведомление об оплате %s", notice["id"])
+                return web.json_response({"ok": False, "error": "send_failed"}, status=502)
+            db.mark_accountant_notification_sent(notice["id"], message.message_id)
+    return web.json_response({"ok": True})
+
+
 def build_web_app(bot) -> web.Application:
     app = web.Application()
     app["bot"] = bot
+    app["notification_lock"] = asyncio.Lock()
+    app.router.add_get("/notify", handle_notify_form)
+    app.router.add_post("/notify_payment", handle_notify_payment)
     app.router.add_get("/form", handle_form)
     app.router.add_get("/config", handle_config)
     app.router.add_post("/mysector", handle_mysector)

@@ -60,7 +60,7 @@ CREATE TABLE IF NOT EXISTS audit_log (
 """
 
 
-CURRENT_SCHEMA_VERSION = 4
+CURRENT_SCHEMA_VERSION = 5
 
 
 def _add_col(conn, table, column, col_type):
@@ -120,11 +120,26 @@ def _migrate_to_v4(conn):
     )""")
 
 
+def _migrate_to_v5(conn):
+    conn.execute("""CREATE TABLE IF NOT EXISTS accountant_notifications (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        accountant_id INTEGER NOT NULL,
+        accountant_name TEXT NOT NULL,
+        description TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        director_id INTEGER NOT NULL,
+        submission_id TEXT NOT NULL,
+        director_message_id INTEGER,
+        UNIQUE (accountant_id, submission_id)
+    )""")
+
+
 _MIGRATIONS = [
     (1, _migrate_to_v1),
     (2, _migrate_to_v2),
     (3, _migrate_to_v3),
     (4, _migrate_to_v4),
+    (5, _migrate_to_v5),
 ]
 
 
@@ -358,6 +373,28 @@ def set_need_photo(request_id: int, file_id: str, is_document: int):
         conn.execute(
             "UPDATE requests SET need_photo_file_id = ?, need_is_document = ? WHERE id = ?",
             (file_id, is_document, request_id))
+        conn.commit()
+
+
+def create_accountant_notification(accountant_id, accountant_name, description,
+                                   director_id, submission_id):
+    with closing(sqlite3.connect(DB_PATH)) as conn:
+        conn.row_factory = sqlite3.Row
+        conn.execute("""INSERT OR IGNORE INTO accountant_notifications
+            (accountant_id, accountant_name, description, created_at, director_id, submission_id)
+            VALUES (?, ?, ?, ?, ?, ?)""",
+            (accountant_id, accountant_name, description,
+             datetime.now(config.TZ).isoformat(timespec="seconds"), director_id, submission_id))
+        conn.commit()
+        return dict(conn.execute("""SELECT * FROM accountant_notifications
+            WHERE accountant_id = ? AND submission_id = ?""",
+            (accountant_id, submission_id)).fetchone())
+
+
+def mark_accountant_notification_sent(notification_id, message_id):
+    with closing(sqlite3.connect(DB_PATH)) as conn:
+        conn.execute("UPDATE accountant_notifications SET director_message_id = ? WHERE id = ?",
+                     (message_id, notification_id))
         conn.commit()
 
 

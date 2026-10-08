@@ -1213,14 +1213,18 @@ def may_submit(user_id: int) -> bool:
 
 async def apply_menu(bot, user_id: int):
     try:
-        if config.WEBAPP_URL and may_submit(user_id):
+        if config.NOTIFYAPP_URL and core.is_accountant(user_id):
+            await bot.set_chat_menu_button(
+                chat_id=user_id,
+                menu_button=MenuButtonWebApp(text="Уведомить", web_app=WebAppInfo(config.NOTIFYAPP_URL)))
+        elif config.WEBAPP_URL and may_submit(user_id):
             await bot.set_chat_menu_button(
                 chat_id=user_id,
                 menu_button=MenuButtonWebApp(text="Потребность", web_app=WebAppInfo(config.WEBAPP_URL)))
         else:
             await bot.set_chat_menu_button(chat_id=user_id, menu_button=MenuButtonCommands())
-    except Exception:
-        pass
+    except Exception as e:
+        log.warning("Не удалось обновить меню пользователя %s: %s", user_id, e)
 
 
 def format_requests(rows, title: str, show_sector: bool = False) -> str:
@@ -1558,6 +1562,9 @@ async def run_all():
             await app.bot.set_chat_menu_button(menu_button=MenuButtonCommands())
         except Exception as e:
             log.warning("Не удалось настроить меню/команды: %s", e)
+
+        for accountant_id in core.accountant_ids():
+            await apply_menu(app.bot, accountant_id)
 
         if config.ADMIN_ID:
             app.job_queue.run_daily(

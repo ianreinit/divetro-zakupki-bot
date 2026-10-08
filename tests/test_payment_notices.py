@@ -41,7 +41,7 @@ class PaymentNoticeTests(unittest.IsolatedAsyncioTestCase):
         db.init_db()
         self.assertEqual(db.get_payment_notices(1)[0]["expanded"], 1)
         with sqlite3.connect(db.DB_PATH) as conn:
-            self.assertEqual(conn.execute("PRAGMA user_version").fetchone()[0], 4)
+            self.assertEqual(conn.execute("PRAGMA user_version").fetchone()[0], db.CURRENT_SCHEMA_VERSION)
 
     async def test_status_follows_payment_and_survives_logistics(self):
         self.assertIn("🟥 Оплачено — 07.10.2026 14:30\n   📄 Без платёжки", core.progress_block(self.req))
