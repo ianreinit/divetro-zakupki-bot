@@ -744,3 +744,19 @@ def set_analytics_excluded(request_id, excluded, actor_id, actor_name):
             datetime.now(config.TZ).isoformat(timespec="seconds")))
         conn.commit()
         return "updated"
+
+
+def bind_accountant_card(request_id, slot, chat_id, message_id):
+    column = ("accountant_msg_id", "accountant2_msg_id")[slot]
+    with closing(sqlite3.connect(DB_PATH)) as conn:
+        conn.execute(f"UPDATE requests SET {column} = ? WHERE id = ?", (message_id, request_id))
+        conn.execute("DELETE FROM payment_notices WHERE request_id = ? AND chat_id = ? AND message_id = ?",
+                     (request_id, chat_id, message_id))
+        conn.commit()
+
+
+def remove_payment_notice(request_id, chat_id, message_id):
+    with closing(sqlite3.connect(DB_PATH)) as conn:
+        conn.execute("DELETE FROM payment_notices WHERE request_id = ? AND chat_id = ? AND message_id = ?",
+                     (request_id, chat_id, message_id))
+        conn.commit()

@@ -17,7 +17,7 @@ from datetime import datetime
 from io import BytesIO
 from functools import wraps
 
-from telegram import InputFile, InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
+from telegram import InputMediaPhoto, InputMediaDocument, InputFile, InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
 from telegram.error import BadRequest
 
 import config
@@ -781,16 +781,37 @@ async def send_accountant_card(bot, req):
         return
     caption = build_full_caption(req)
     kb = kb_accountant(req)
-    for i, aid in enumerate(ids):
+    notices = db.get_payment_notices(req['id'])
+    for i, aid in enumerate(ids[:2]):
+        existing = req.get("accountant_msg_id" if i == 0 else "accountant2_msg_id")
+        candidate = existing or next((n['message_id'] for n in reversed(notices)
+                                     if n['chat_id'] == aid and n['expanded']), None)
         try:
+            if candidate:
+                try:
+                    if req['photo_file_id']:
+                        media_type = InputMediaDocument if req['is_document'] else InputMediaPhoto
+                        await bot.edit_message_media(chat_id=aid, message_id=candidate,
+                            media=media_type(req['photo_file_id'], caption=_trim_caption(caption)), reply_markup=kb)
+                    else:
+                        await bot.edit_message_text(chat_id=aid, message_id=candidate, text=caption, reply_markup=kb)
+                except BadRequest as e:
+                    reason = str(e).lower()
+                    if 'message is not modified' in reason:
+                        pass
+                    elif 'message to edit not found' in reason:
+                        candidate = None
+                    else:
+                        raise
+                if candidate:
+                    db.bind_accountant_card(req['id'], i, aid, candidate)
+                    continue
             m, _ = await _send_card(bot, aid, req["photo_file_id"], caption,
                                     bool(req["is_document"]), reply_markup=kb)
-            if i == 0:
-                db.set_accountant_msg(req["id"], m.message_id)
-            else:
-                db.set_accountant2_msg(req["id"], m.message_id)
+            db.bind_accountant_card(req['id'], i, aid, m.message_id)
         except Exception as e:
-            log.warning("Не удалось отправить карточку бухгалтеру %s: %s", aid, e)
+            # An uncertain edit must not be followed by a second card.
+            log.warning("Не удалось обновить/отправить карточку бухгалтеру %s: %s", aid, e)
 
 
 async def notify_paid(bot, req):

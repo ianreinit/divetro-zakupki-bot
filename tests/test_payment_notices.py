@@ -5,7 +5,9 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
+import config
 import core
+from telegram.error import BadRequest, TimedOut
 import db
 import main
 
@@ -101,6 +103,57 @@ class PaymentNoticeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(text_call["reply_markup"].inline_keyboard[0][0].callback_data, "act:openpay:1")
         self.assertIsNone(caption_call["reply_markup"])
         self.bot.send_message.assert_not_awaited()
+
+    def prepare_approval(self, media=False):
+        with sqlite3.connect(db.DB_PATH) as c:
+            c.execute("""INSERT INTO requests(id,request_no,sector,supplier,amount,naryad,
+                submitted_by_id,submitted_by_name,submitted_at,status,photo_file_id,is_document)
+                VALUES(1,'АДМ-081026-02',?,'Metancor',3457,'Расчёт',10,'Автор',
+                '2026-10-08T12:00:00','одобрено',?,?)""",
+                (config.ADMIN_SECTOR, 'invoice' if media else None, int(media)))
+        for uid, mid in [(20,300),(21,301)]:
+            db.save_payment_notice(1,uid,mid,'Автор')
+            db.expand_payment_notice(1,uid,mid)
+        self.bot.edit_message_media=AsyncMock()
+        self.bot.send_document=AsyncMock(return_value=SimpleNamespace(message_id=400,document=SimpleNamespace(file_id='invoice')))
+
+    async def test_approval_reuses_expanded_notices_for_both_accountants(self):
+        self.prepare_approval()
+        with patch.object(core,'accountant_ids',return_value=[20,21]):
+            await core.send_accountant_card(self.bot,db.get_by_id(1))
+            req=db.get_by_id(1)
+            self.assertEqual((req['accountant_msg_id'],req['accountant2_msg_id']),(300,301))
+            self.assertEqual(db.get_payment_notices(1),[])
+            # A subsequent refresh must not replace the primary keyboard with notice buttons.
+            await core.refresh_all_cards(self.bot,req)
+            await core.send_accountant_card(self.bot,db.get_by_id(1))
+        self.bot.send_message.assert_not_awaited()
+        self.assertIn('Оплатить', self.bot.edit_message_text.call_args.kwargs['reply_markup'].inline_keyboard[0][0].text)
+
+    async def test_media_notice_is_promoted_without_resending_invoice(self):
+        self.prepare_approval(media=True)
+        with patch.object(core,'accountant_ids',return_value=[20,21]):
+            await core.send_accountant_card(self.bot,db.get_by_id(1))
+        self.assertEqual(self.bot.edit_message_media.await_count,2)
+        self.bot.send_document.assert_not_awaited()
+        self.assertEqual(db.get_by_id(1)['accountant_msg_id'],300)
+
+    async def test_missing_notice_falls_back_but_timeout_does_not_duplicate(self):
+        self.prepare_approval()
+        self.bot.edit_message_text.side_effect=[BadRequest('Message to edit not found'),TimedOut()]
+        with patch.object(core,'accountant_ids',return_value=[20,21]):
+            await core.send_accountant_card(self.bot,db.get_by_id(1))
+        self.bot.send_message.assert_awaited_once()
+        self.assertEqual(self.bot.send_message.call_args.args[0],20)
+        self.assertIsNone(db.get_by_id(1)['accountant2_msg_id'])
+
+    async def test_unchanged_card_is_bound_without_sending_new_message(self):
+        self.prepare_approval()
+        self.bot.edit_message_text.side_effect=BadRequest('Message is not modified')
+        with patch.object(core,'accountant_ids',return_value=[20,21]):
+            await core.send_accountant_card(self.bot,db.get_by_id(1))
+        self.bot.send_message.assert_not_awaited()
+        self.assertEqual(db.get_payment_notices(1),[])
 
     async def test_upload_refreshes_cards_after_saving_receipt(self):
         self.context.user_data = {"attach_req_id": 1, "payment_prompt_msg_id": 400}
