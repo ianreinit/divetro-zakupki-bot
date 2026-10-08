@@ -44,7 +44,7 @@ class PaymentNoticeTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(conn.execute("PRAGMA user_version").fetchone()[0], db.CURRENT_SCHEMA_VERSION)
 
     async def test_status_follows_payment_and_survives_logistics(self):
-        self.assertIn("🟥 Оплачено — 07.10.2026 14:30\n   📄 Без платёжки", core.progress_block(self.req))
+        self.assertIn("🟥 Оплачено — 07.10.2026 14:30\nКатегория: Не распределено\n   📄 Без платёжки", core.progress_block(self.req))
         self.req.update(payment_file_id="receipt", status="получено",
                         received_at="2026-10-08T10:00:00")
         text = core.progress_block(self.req)

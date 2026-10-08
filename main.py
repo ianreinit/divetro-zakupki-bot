@@ -908,14 +908,32 @@ async def _act_pay(query, context, req, req_id, uid, now):
     if req["status"] != "одобрено":
         await query.answer("Заявка ещё не одобрена или уже оплачена.", show_alert=True)
         return
-    await query.answer("Оплачено")
-    db.set_status(req_id, "оплачено", "paid_by", query.from_user.full_name, "paid_at", now)
-    db.log_action(req_id, "оплачено", uid, query.from_user.full_name)
-    req = db.get_by_id(req_id)
-    await core.refresh_all_cards(context.bot, req)
-    await core.notify_paid(context.bot, req)
-    if req["sector"] != config.ADMIN_SECTOR:
-        await core.send_driver_card(context.bot, req)
+    await query.answer("Выберите категорию — оплата подтвердится сразу.", show_alert=True)
+    await query.edit_message_reply_markup(reply_markup=core.category_choices(req_id))
+
+
+async def _act_category(query, context, req, req_id, uid, now):
+    if not core.is_accountant(uid) or not req.get("paid_at"):
+        await query.answer("Недоступно.", show_alert=True)
+        return
+    await query.answer("Выберите новую категорию.")
+    await query.edit_message_reply_markup(reply_markup=core.category_choices(req_id, edit=True))
+
+
+async def _act_category_selected(query, context, req, req_id, uid, now):
+    action = query.data.split(":")[1]
+    category = action.split("_", 1)[1]
+    if category not in config.EXPENSE_CATEGORIES:
+        await query.answer("Неизвестная категория.", show_alert=True)
+        return
+    if not core.is_accountant(uid):
+        await query.answer("Только бухгалтер.", show_alert=True)
+        return
+    await query.answer()
+    result = await core.apply_categorized_payment(context.bot, req_id, category, uid,
+        query.from_user.full_name, edit=action.startswith("editcat_"))
+    if result != "updated":
+        await core.refresh_all_cards(context.bot, db.get_by_id(req_id))
 
 
 async def _act_needpay(query, context, req, req_id, uid, now):
@@ -1105,6 +1123,7 @@ _ACTION_HANDLERS = {
     "approve": _act_approve,
     "resubmit": _act_resubmit,
     "pay": _act_pay,
+    "category": _act_category,
     "needpay": _act_needpay,
     "openpay": _act_openpay,
     "ship": _act_ship,
@@ -1122,6 +1141,8 @@ async def action_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     handler = _ACTION_HANDLERS.get(action)
+    if action.startswith(("paycat_", "editcat_")):
+        handler = _act_category_selected
     if not handler:
         await query.answer("Неизвестное действие.", show_alert=True)
         return
@@ -1210,6 +1231,7 @@ ACTION_LABEL = {
     "перенаправлено": "🔄 Перенаправлено",
     "адм_заявка": "📝 Адм. заявка",
     "платёжка": "📄 Платёжка прикреплена",
+    "категория": "Категория расхода изменена",
 }
 
 

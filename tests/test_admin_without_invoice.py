@@ -86,15 +86,18 @@ class AdminWithoutInvoiceTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("Счёт не приложен", call.args[1])
             self.assertIn("Одобрено", call.args[1])
             if call.args[0] in (20, 21):
-                self.assertEqual(call.kwargs["reply_markup"].inline_keyboard[0][0].callback_data, "act:pay:1")
+                self.assertEqual(call.kwargs["reply_markup"].inline_keyboard[0][0].text, "✅ Оплатить")
         self.bot.send_photo.assert_not_awaited()
         self.bot.send_document.assert_not_awaited()
 
     async def test_payment_receipt_and_comments_refresh_text_cards(self):
         req = await self.create_request()
-        query = SimpleNamespace(answer=AsyncMock(), from_user=SimpleNamespace(full_name="Анна"))
+        query = SimpleNamespace(answer=AsyncMock(), edit_message_reply_markup=AsyncMock(),
+                                from_user=SimpleNamespace(full_name="Анна"))
         context = SimpleNamespace(bot=self.bot, user_data={"attach_req_id": 1})
         await main._act_pay(query, context, req, 1, 20, "2026-10-08T12:00:00")
+        self.assertEqual(db.get_by_id(1)["status"], "одобрено")
+        await core.apply_categorized_payment(self.bot, 1, "services", 20, "Анна")
         req = db.get_by_id(1)
         self.assertEqual(req["status"], "оплачено")
         self.assertIn("Без платёжки", self.bot.edit_message_text.call_args.kwargs["text"])

@@ -146,6 +146,7 @@ def progress_block(req) -> str:
         lines.append(f"🟢 Одобрено — {_fmt_dt(req['approved_at'])}")
     if req.get("paid_at"):
         lines.append(f"🟥 Оплачено — {_fmt_dt(req['paid_at'])}")
+        lines.append(f"Категория: {config.EXPENSE_CATEGORIES.get(req.get('expense_category'), 'Не распределено')}")
         lines.append("   📄 Платёжка прикреплена" if req.get("payment_file_id")
                      else "   📄 Без платёжки")
     if req.get("shipped_at"):
@@ -339,8 +340,41 @@ def kb_buyer(req):
 def kb_accountant(req):
     if req["status"] == "одобрено":
         return InlineKeyboardMarkup([[
-            InlineKeyboardButton("✅ Оплатить", callback_data=f"act:pay:{req['id']}")]])
-    return attach_kb(req["id"])
+            payment_category_button(req["id"]) ]])
+    rows = list(attach_kb(req["id"]).inline_keyboard)
+    if req.get("paid_at"):
+        rows.append([payment_category_button(req["id"], edit=True)])
+    return InlineKeyboardMarkup(rows)
+
+
+def payment_category_button(req_id, edit=False):
+    label = "Изменить категорию" if edit else "✅ Оплатить"
+    mode = "edit" if edit else "pay"
+    if config.PAYMENT_CATEGORY_URL:
+        return InlineKeyboardButton(label, web_app=WebAppInfo(
+            f"{config.PAYMENT_CATEGORY_URL}?req={req_id}&mode={mode}"))
+    return InlineKeyboardButton(label, callback_data=f"act:{'category' if edit else 'pay'}:{req_id}")
+
+
+def category_choices(req_id, edit=False):
+    buttons = [InlineKeyboardButton(label, callback_data=f"act:{'editcat' if edit else 'paycat'}_{key}:{req_id}")
+               for key, label in config.EXPENSE_CATEGORIES.items()]
+    return InlineKeyboardMarkup([buttons[i:i+2] for i in range(0, len(buttons), 2)])
+
+
+async def apply_categorized_payment(bot, req_id, category, uid, name, *, edit=False):
+    if not is_accountant(uid):
+        return "not_allowed"
+    result = db.categorize_payment(req_id, category, uid, name,
+        datetime.now(config.TZ).isoformat(timespec="seconds"), edit=edit)
+    if result == "updated":
+        req = db.get_by_id(req_id)
+        await refresh_all_cards(bot, req)
+        if not edit:
+            await notify_paid(bot, req)
+            if req["sector"] != config.ADMIN_SECTOR:
+                await send_driver_card(bot, req)
+    return result
 
 
 @with_comments

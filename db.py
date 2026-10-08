@@ -60,7 +60,7 @@ CREATE TABLE IF NOT EXISTS audit_log (
 """
 
 
-CURRENT_SCHEMA_VERSION = 6
+CURRENT_SCHEMA_VERSION = 7
 
 
 def _add_col(conn, table, column, col_type):
@@ -155,6 +155,10 @@ def _migrate_to_v6(conn):
     )""")
 
 
+def _migrate_to_v7(conn):
+    _add_col(conn, "requests", "expense_category", "TEXT")
+
+
 _MIGRATIONS = [
     (1, _migrate_to_v1),
     (2, _migrate_to_v2),
@@ -162,6 +166,7 @@ _MIGRATIONS = [
     (4, _migrate_to_v4),
     (5, _migrate_to_v5),
     (6, _migrate_to_v6),
+    (7, _migrate_to_v7),
 ]
 
 
@@ -591,6 +596,37 @@ _STATUS_FIELDS = frozenset({
     "shipped_by", "shipped_at", "received_by", "received_at",
     "processed_by", "processed_at",
 })
+
+
+def categorize_payment(request_id, category, actor_id, actor_name, when, *, edit=False):
+    if category not in config.EXPENSE_CATEGORIES:
+        raise ValueError("Invalid expense category")
+    with closing(sqlite3.connect(DB_PATH)) as conn:
+        conn.row_factory = sqlite3.Row
+        with conn:
+            conn.execute("BEGIN IMMEDIATE")
+            req = conn.execute("SELECT * FROM requests WHERE id = ?", (request_id,)).fetchone()
+            if req is None:
+                return "not_found"
+            if edit:
+                if not req["paid_at"] or req["status"] not in ("оплачено", "в_пути", "получено"):
+                    return "not_paid"
+                if req["expense_category"] == category:
+                    return "unchanged"
+                conn.execute("UPDATE requests SET expense_category = ? WHERE id = ?", (category, request_id))
+                action = "категория"
+                old = config.EXPENSE_CATEGORIES.get(req["expense_category"], "Не распределено")
+                detail = f"{old} → {config.EXPENSE_CATEGORIES[category]}"
+            else:
+                if req["status"] != "одобрено" or req["paid_at"]:
+                    return "already_paid" if req["paid_at"] else "not_approved"
+                conn.execute("""UPDATE requests SET status = 'оплачено', paid_by = ?, paid_at = ?,
+                    expense_category = ? WHERE id = ?""", (actor_name, when, category, request_id))
+                action = "оплачено"
+                detail = f"Категория: {config.EXPENSE_CATEGORIES[category]}"
+            conn.execute("INSERT INTO audit_log (request_id, action, actor_id, actor_name, detail, ts) VALUES (?, ?, ?, ?, ?, ?)",
+                         (request_id, action, actor_id, actor_name, detail, when))
+    return "updated"
 
 
 def set_status(request_id: int, status: str, actor_field: str, actor_name: str,
