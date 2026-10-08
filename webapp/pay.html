@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
 <title>Прикрепить платёжку</title>
-<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<script defer src="telegram_bootstrap.js?v=1"></script>
 <style>
   :root {
     --bg: var(--tg-theme-bg-color, #ffffff);
@@ -47,7 +47,7 @@
   #submit:disabled { opacity: .6; cursor: default; }
 </style>
 </head>
-<body>
+<body inert>
   <h1>Прикрепить платёжку</h1>
   <div class="hint-line" id="reqline"></div>
 
@@ -64,6 +64,18 @@
   <button id="submit" disabled>Отправить</button>
 
 <script>
+window.addEventListener('DOMContentLoaded', async () => {
+  try { if (!window.telegramReady) throw new Error('Не удалось загрузить окно. Проверьте соединение.'); await window.telegramReady; }
+  catch (error) {
+    document.body.inert = false;
+    const box = document.createElement('div'); box.setAttribute('role', 'alert');
+    box.style.cssText = 'padding:20px;background:#fff0ed;color:#8b2020;position:fixed;inset:0;z-index:100;';
+    box.textContent = error.message + ' ';
+    const retry = document.createElement('button'); retry.textContent = 'Повторить';
+    retry.onclick = () => location.reload(); box.append(retry); document.body.append(box); return;
+  }
+  document.body.inert = false;
+
   const tg = window.Telegram ? window.Telegram.WebApp : null;
   if (tg) { tg.ready(); tg.expand(); }
 
@@ -135,6 +147,7 @@
     };
     return map[code] || "Что-то пошло не так. Попробуйте ещё раз.";
   }
+});
 </script>
 </body>
 </html>

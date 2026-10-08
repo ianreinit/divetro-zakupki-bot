@@ -1,14 +1,26 @@
 <!doctype html>
 <html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Личный кабинет · DIVETRO</title>
-<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<script defer src="telegram_bootstrap.js?v=1"></script>
 <style>
 *{box-sizing:border-box}body{margin:0;background:var(--tg-theme-secondary-bg-color,#f2f4f7);color:var(--tg-theme-text-color,#172535);font:15px/1.5 -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif}main{max-width:640px;margin:auto;padding:22px 16px 40px}header,.row{display:flex;justify-content:space-between;gap:12px;align-items:center}h1{font-size:24px;letter-spacing:-.6px;margin:3px 0}h2{font-size:21px;margin:20px 0 4px}.hint{color:var(--tg-theme-hint-color,#657587);font-size:13px}.brand{font-size:11px;letter-spacing:2px;color:var(--tg-theme-link-color,#236baf);font-weight:700}button,input,select{font:inherit}button{cursor:pointer;min-height:42px;border:1px solid #8899aa30;border-radius:11px;padding:10px 13px;color:inherit;background:var(--tg-theme-bg-color,#fff)}button:disabled{opacity:.5;cursor:wait}nav{display:flex;padding:5px;gap:4px;margin:24px 0 16px;border-radius:14px;background:var(--tg-theme-bg-color,#fff)}nav button{flex:1;border:0;font-size:14px;padding:10px 4px}button[aria-pressed=true],.primary{background:var(--tg-theme-button-color,#2267a5);color:var(--tg-theme-button-text-color,#fff);border-color:transparent}.filters{display:flex;flex-wrap:wrap;gap:7px;margin:14px 0}.filters button{font-size:13px}.card,.panel{background:var(--tg-theme-bg-color,#fff);border:1px solid #8899aa25;border-radius:15px;padding:17px;margin:10px 0}.card{display:block;width:100%;text-align:left}.card strong{font-size:16px;font-weight:600}.money{white-space:nowrap;font-variant-numeric:tabular-nums}.small{font-size:13px;margin-top:6px;overflow-wrap:anywhere}.state{color:var(--tg-theme-link-color,#236baf);font-size:13px;margin-top:14px}.total{font-size:32px;font-weight:650;letter-spacing:-1px}.wide{width:100%;margin-top:10px}input,select{width:100%;padding:12px;border:1px solid #8899aa50;border-radius:11px;background:var(--tg-theme-bg-color,#fff);color:inherit;min-width:0}label{display:block;font-size:13px;margin:12px 0 5px}.track{background:#8899aa22;height:5px;border-radius:5px;margin-top:12px}.bar{height:5px;background:var(--tg-theme-button-color,#2267a5);border-radius:5px}pre{font:inherit;white-space:pre-wrap;overflow-wrap:anywhere}#error{color:#bc3434}#status{font-size:14px}#child{position:fixed;inset:0;background:var(--tg-theme-secondary-bg-color,#f2f4f7);z-index:5;display:flex;flex-direction:column}#childbar{padding:10px 16px;border-bottom:1px solid #8899aa40}iframe{width:100%;flex:1;border:0;background:white}body.child-open{overflow:hidden}[hidden]{display:none!important}@media(max-width:360px){main{padding:18px 12px}.row{flex-wrap:wrap}.total{font-size:28px}}
-</style></head><body><main>
+</style></head><body inert><main>
 <header><div><div class="brand">DIVETRO</div><h1>Личный кабинет</h1><div id="role" class="hint">Загрузка…</div></div><button id="refresh" aria-label="Обновить">↻</button></header>
 <nav aria-label="Разделы"><button data-view="tasks" aria-pressed="true">Мои задачи</button><button data-view="search" aria-pressed="false">Поиск</button><button data-view="analytics" aria-pressed="false">Аналитика</button></nav>
 <button id="notifications" class="wide" hidden>Отправленные уведомления</button><div id="controls"></div><p id="error" role="alert" hidden></p><p id="status" role="status"></p><section id="content"></section><button id="more" class="wide" hidden>Показать ещё</button>
 </main><div id="child" hidden><div id="childbar"><button id="return">← К заявке</button></div><iframe id="frame" title="Действие по заявке"></iframe></div>
 <script>
+window.addEventListener('DOMContentLoaded', async () => {
+  try { if (!window.telegramReady) throw new Error('Не удалось загрузить окно. Проверьте соединение.'); await window.telegramReady; }
+  catch (error) {
+    document.body.inert = false;
+    const box = document.createElement('div'); box.setAttribute('role', 'alert');
+    box.style.cssText = 'padding:20px;background:#fff0ed;color:#8b2020;position:fixed;inset:0;z-index:100;';
+    box.textContent = error.message + ' ';
+    const retry = document.createElement('button'); retry.textContent = 'Повторить';
+    retry.onclick = () => location.reload(); box.append(retry); document.body.append(box); return;
+  }
+  document.body.inert = false;
+
 const tg=window.Telegram?.WebApp;tg?.ready();tg?.expand();
 const $=id=>document.getElementById(id),esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const money=v=>Number(v||0).toLocaleString('ru-RU',{maximumFractionDigits:2})+' лей';
@@ -65,4 +77,5 @@ document.addEventListener('click',async e=>{const b=e.target.closest('button');i
 });
 $('notifications').onclick=()=>{state.view='notifications';selected=null;state.drill=null;document.querySelectorAll('[data-view]').forEach(b=>b.setAttribute('aria-pressed','false'));load();};
 $('refresh').onclick=()=>selected?detail(selected):load();$('more').onclick=()=>load(true);load();
+});
 </script></body></html>

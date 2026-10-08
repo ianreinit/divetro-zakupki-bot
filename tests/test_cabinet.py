@@ -13,6 +13,7 @@ from urllib.parse import urlencode
 
 from aiohttp.test_utils import TestClient, TestServer
 import cabinet
+import comments
 import config
 import core
 import db
@@ -201,6 +202,32 @@ class CabinetTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(db.list_all_requests()),5)
         self.assertFalse(db.get_by_id(3)['analytics_excluded'])
         self.assertEqual((await self.get(view='analytics'))['total'],500)
+
+    async def test_access_snapshot_matches_existing_rules_and_refreshes_roles(self):
+        rows=db.list_all_requests(-1)
+        for uid in (10,11,20,30,40,50,60,999):
+            check=comments.access_checker(uid)
+            self.assertEqual([check(r) for r in rows], [comments.can_access(uid,r) for r in rows])
+        original=sqlite3.connect
+        with patch('sqlite3.connect',side_effect=original) as connections:
+            check=comments.access_checker(60)
+            for r in rows*200: check(r)
+            self.assertLess(connections.call_count,15)
+        with patch.object(core,'director_ids',return_value=[60]):
+            self.assertTrue(comments.access_checker(60)(db.get_by_id(2)))
+        self.assertFalse(comments.access_checker(60)(db.get_by_id(2)))
+
+    async def test_form_bootstrap_served_and_html_does_not_block_on_external_sdk(self):
+        response=await self.client.get('/telegram_bootstrap.js')
+        self.assertEqual(response.status,200)
+        self.assertIn('max-age',response.headers['Cache-Control'])
+        for path in ('/cabinet','/comments','/payment_category','/notify','/form','/pay',
+                     '/buyer_form','/buyer_request_form','/admin_request'):
+            response=await self.client.get(path)
+            html=await response.text()
+            self.assertIn('defer src="telegram_bootstrap.js?v=1"',html)
+            self.assertIn('await window.telegramReady',html)
+            self.assertNotIn('<script src="https://telegram.org',html)
 
     async def test_menu_available_to_admin_and_accountant(self):
         bot=SimpleNamespace(set_chat_menu_button=AsyncMock(),delete_my_commands=AsyncMock(),set_my_commands=AsyncMock())

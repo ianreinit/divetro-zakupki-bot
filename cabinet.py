@@ -130,7 +130,8 @@ async def data_view(request):
         if offset < 0: raise ValueError
     except (ValueError, TypeError): return comments.error('bad_request', 400)
     # Filter access before counting, searching or aggregating. Never truncate financial totals.
-    rows = [r for r in db.list_all_requests(limit=-1) if comments.can_access(uid, r)]
+    can_access = comments.access_checker(uid)
+    rows = [r for r in db.list_all_requests(limit=-1) if can_access(r)]
     tasks = [{'key': k, 'label': TASKS[k], 'count': sum(matches(r, k, uid) for r in rows)} for k in task_keys(uid)]
     response = {'ok': True, 'role': comments.user_role(uid), 'tasks': tasks, 'notifications': core.is_accountant(uid), 'manage_analytics': core.is_director(uid)}
     if view == 'tasks':

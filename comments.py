@@ -28,6 +28,25 @@ def can_access(uid, req):
     return bool(person and person["sector"] == req["sector"])
 
 
+def access_checker(uid):
+    """Snapshot access once per read request; never cache across users or requests."""
+    if core.is_admin(uid) or core.is_director(uid) or core.is_accountant(uid):
+        return lambda req: True
+    buyer = core.is_buyer(uid)
+    driver = core.is_driver(uid)
+    warehouse = core.is_warehouse(uid)
+    person = db.get_person(uid)
+    sector = person['sector'] if person else None
+    def check(req):
+        if req['sector'] == config.ADMIN_SECTOR:
+            return False
+        return bool(buyer or uid == req['submitted_by_id'] or
+                    (driver and req.get('driver_msg_id')) or
+                    (warehouse and req.get('warehouse_msg_id')) or
+                    (sector and sector == req['sector']))
+    return check
+
+
 def user_role(uid):
     for check, label in [(core.is_admin, "Администратор"), (core.is_director, "Директор"),
                          (core.is_accountant, "Бухгалтер"), (core.is_buyer, "Закупщик"),

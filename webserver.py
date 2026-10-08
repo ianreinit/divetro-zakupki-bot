@@ -556,13 +556,30 @@ async def handle_notify_payment(request: web.Request) -> web.Response:
     return web.json_response({"ok": True})
 
 
+async def handle_telegram_bootstrap(request):
+    return web.FileResponse(os.path.join(HERE, "webapp", "telegram_bootstrap.js"),
+                            headers={"Cache-Control": "public, max-age=86400"})
+
+
+@web.middleware
+async def response_timing(request, handler):
+    started = time.perf_counter()
+    response = await handler(request)
+    elapsed_ms = (time.perf_counter() - started) * 1000
+    response.headers["Server-Timing"] = f"app;dur={elapsed_ms:.1f}"
+    if elapsed_ms >= 1000:
+        log.warning("Slow web request: %s %s %.0fms", request.method, request.path, elapsed_ms)
+    return response
+
+
 def build_web_app(bot) -> web.Application:
-    app = web.Application()
+    app = web.Application(middlewares=[response_timing])
     app["bot"] = bot
     app["notification_lock"] = asyncio.Lock()
     comments.register(app, verify_init_data)
     payment_categories.register(app)
     cabinet.register(app)
+    app.router.add_get("/telegram_bootstrap.js", handle_telegram_bootstrap)
     app.router.add_get("/notify", handle_notify_form)
     app.router.add_get("/admin_request", handle_admin_request_form)
     app.router.add_post("/admin_request_submit", handle_admin_request_submit)

@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Уведомить директора</title>
-<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<script defer src="telegram_bootstrap.js?v=1"></script>
 <style>
 * { box-sizing: border-box; }
 body { margin: 0; padding: 24px 16px; font: 16px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
@@ -23,7 +23,7 @@ button:disabled { opacity: .55; }
 [hidden] { display: none !important; }
 </style>
 </head>
-<body>
+<body inert>
 <main>
   <section id="entry">
     <h1>Уведомить директора об оплате</h1>
@@ -43,6 +43,18 @@ button:disabled { opacity: .55; }
   </section>
 </main>
 <script>
+window.addEventListener('DOMContentLoaded', async () => {
+  try { if (!window.telegramReady) throw new Error('Не удалось загрузить окно. Проверьте соединение.'); await window.telegramReady; }
+  catch (error) {
+    document.body.inert = false;
+    const box = document.createElement('div'); box.setAttribute('role', 'alert');
+    box.style.cssText = 'padding:20px;background:#fff0ed;color:#8b2020;position:fixed;inset:0;z-index:100;';
+    box.textContent = error.message + ' ';
+    const retry = document.createElement('button'); retry.textContent = 'Повторить';
+    retry.onclick = () => location.reload(); box.append(retry); document.body.append(box); return;
+  }
+  document.body.inert = false;
+
 const tg = window.Telegram?.WebApp;
 tg?.ready(); tg?.expand();
 const field = document.getElementById('description');
@@ -85,6 +97,7 @@ document.getElementById('form').addEventListener('submit', async (event) => {
   }
 });
 document.getElementById('close').addEventListener('click', () => tg?.close());
+});
 </script>
 </body>
 </html>
