@@ -1485,7 +1485,7 @@ async def employees_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ---------- Бэкап базы ----------
 
-async def daily_backup(context: ContextTypes.DEFAULT_TYPE):
+async def monthly_backup(context: ContextTypes.DEFAULT_TYPE):
     if not config.ADMIN_ID:
         return
     db_path = os.path.abspath(config.DB_PATH)
@@ -1648,9 +1648,9 @@ async def run_all():
             await apply_menu(app.bot, accountant_id)
 
         if config.ADMIN_ID:
-            app.job_queue.run_daily(
-                daily_backup, time=dtime(18, 30, tzinfo=config.TZ))
-            log.info("Бэкап базы запланирован на 18:30 (%s)", config.TZ)
+            app.job_queue.run_monthly(
+                monthly_backup, when=dtime(18, 30, tzinfo=config.TZ), day=1)
+            log.info("Бэкап базы запланирован на 1-е число каждого месяца, 18:30 (%s)", config.TZ)
 
         log.info("Бот запущен")
         stop_event = asyncio.Event()
