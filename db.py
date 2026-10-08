@@ -60,7 +60,7 @@ CREATE TABLE IF NOT EXISTS audit_log (
 """
 
 
-CURRENT_SCHEMA_VERSION = 8
+CURRENT_SCHEMA_VERSION = 9
 
 
 def _add_col(conn, table, column, col_type):
@@ -163,6 +163,10 @@ def _migrate_to_v8(conn):
     _add_col(conn, "accountant_notifications", "accountant_message_id", "INTEGER")
 
 
+def _migrate_to_v9(conn):
+    _add_col(conn, "requests", "analytics_excluded", "INTEGER NOT NULL DEFAULT 0")
+
+
 _MIGRATIONS = [
     (1, _migrate_to_v1),
     (2, _migrate_to_v2),
@@ -172,6 +176,7 @@ _MIGRATIONS = [
     (6, _migrate_to_v6),
     (7, _migrate_to_v7),
     (8, _migrate_to_v8),
+    (9, _migrate_to_v9),
 ]
 
 
@@ -720,3 +725,22 @@ def accountant_notification_history(uid, offset=0):
         return conn.execute("""SELECT id, description, created_at, director_message_id,
             accountant_message_id FROM accountant_notifications WHERE accountant_id = ?
             ORDER BY id DESC LIMIT 41 OFFSET ?""", (uid, offset)).fetchall()
+
+
+def set_analytics_excluded(request_id, excluded, actor_id, actor_name):
+    """Change reporting scope and its audit entry in one transaction."""
+    with closing(sqlite3.connect(DB_PATH)) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute("SELECT analytics_excluded FROM requests WHERE id = ?", (request_id,)).fetchone()
+        if row is None:
+            return "not_found"
+        if bool(row[0]) == excluded:
+            return "unchanged"
+        conn.execute("UPDATE requests SET analytics_excluded = ? WHERE id = ?", (int(excluded), request_id))
+        conn.execute("""INSERT INTO audit_log (request_id,action,actor_id,actor_name,detail,ts)
+            VALUES (?,?,?,?,?,?)""", (request_id,
+            "исключено_из_аналитики" if excluded else "восстановлено_в_аналитике", actor_id, actor_name,
+            "Тестовая заявка" if excluded else "Возвращена в расчёты",
+            datetime.now(config.TZ).isoformat(timespec="seconds")))
+        conn.commit()
+        return "updated"

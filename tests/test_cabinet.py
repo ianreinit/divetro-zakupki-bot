@@ -144,6 +144,64 @@ class CabinetTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(cabinet.paid_in_period({'status':'оплачено', 'paid_at':'2026-09-30T21:30:00+00:00'}, start, now))
         self.assertFalse(cabinet.paid_in_period({'status':'оплачено', 'paid_at':'2026-09-30T20:30:00+00:00'}, start, now))
 
+    async def visibility(self, uid=11, req=3, excluded=True, **extra):
+        return await self.client.post('/cabinet_analytics_visibility', json=self.payload(
+            uid, req=req, excluded=excluded, confirmed=True, **extra))
+
+    async def test_only_director_can_manage_analytics_including_not_admin(self):
+        for uid in (10,20,30,40,50,60):
+            response = await self.visibility(uid)
+            self.assertEqual(response.status,403)
+            response = await self.client.post('/cabinet_data',json=self.payload(uid,view='excluded'))
+            self.assertEqual(response.status,403)
+        self.assertFalse(db.get_by_id(3)['analytics_excluded'])
+        self.assertEqual(db.get_audit_log(3),[])
+        for uid, expected in [(11,True),(10,False),(20,False)]:
+            response=await self.client.post('/cabinet_detail',json=self.payload(uid,req=3))
+            self.assertEqual((await response.json())['manage_analytics'],expected)
+
+    async def test_exclusion_restore_and_audit_preserve_payment_and_history(self):
+        original=db.get_by_id(3)
+        self.assertEqual((await self.visibility()).status,200)
+        self.assertEqual((await self.visibility()).status,200)
+        changed=db.get_by_id(3)
+        self.assertTrue(changed['analytics_excluded'])
+        for key in ('paid_at','paid_by','status','amount','payment_pending_for','expense_category'):
+            self.assertEqual(changed[key],original[key])
+        self.assertEqual(len(db.get_audit_log(3)),1)
+        self.assertEqual(db.get_audit_log(3)[0]['actor_id'],11)
+        for group in ('category','supplier','order'):
+            d=await self.get(view='analytics',group=group)
+            self.assertEqual(d['total'],200)
+            self.assertNotIn(3,[r['id'] for r in d['items']])
+        # Search still finds the original request, but its amount is not an expense.
+        d=await self.get(view='search',field='order',query='125')
+        self.assertEqual(d['count'],2)
+        self.assertEqual(d['paid_total'],0)
+        self.assertEqual((await self.get(11,view='excluded'))['count'],1)
+        self.assertEqual((await self.visibility(excluded=False)).status,200)
+        self.assertEqual((await self.get(view='analytics'))['total'],500)
+        self.assertEqual((await self.get(11,view='excluded'))['count'],0)
+        self.assertEqual(len(db.get_audit_log(3)),2)
+        self.bot.send_message.assert_not_awaited()
+
+    async def test_visibility_requires_confirmation_and_valid_request(self):
+        for extra in ({'excluded':'false','confirmed':True},{'excluded':True,'confirmed':False},
+                      {'excluded':True}):
+            response=await self.client.post('/cabinet_analytics_visibility',json=self.payload(11,req=3,**extra))
+            self.assertEqual(response.status,400)
+        self.assertEqual((await self.visibility(req=999)).status,404)
+        self.assertFalse(db.get_by_id(3)['analytics_excluded'])
+
+    async def test_v9_migration_preserves_existing_requests(self):
+        with sqlite3.connect(db.DB_PATH) as c:
+            c.execute('ALTER TABLE requests DROP COLUMN analytics_excluded')
+            c.execute('PRAGMA user_version=8')
+        db.init_db()
+        self.assertEqual(len(db.list_all_requests()),5)
+        self.assertFalse(db.get_by_id(3)['analytics_excluded'])
+        self.assertEqual((await self.get(view='analytics'))['total'],500)
+
     async def test_menu_available_to_admin_and_accountant(self):
         bot=SimpleNamespace(set_chat_menu_button=AsyncMock(),delete_my_commands=AsyncMock(),set_my_commands=AsyncMock())
         with patch.object(config,'CABINET_URL','https://example.com/cabinet'),patch.object(config,'NOTIFYAPP_URL','https://example.com/notify'):

@@ -82,6 +82,7 @@ def public(req):
     return {**{k: req.get(k) for k in ('id', 'sector', 'supplier', 'amount', 'order_no', 'naryad',
         'description', 'status', 'submitted_at', 'needed_by', 'paid_at', 'submitted_by_name')},
         'number': req['request_no'],
+        'analytics_excluded': bool(req.get('analytics_excluded')),
         'category': config.EXPENSE_CATEGORIES.get(req.get('expense_category'), 'Не распределено'),
         'receipt': 'Платёжка прикреплена' if req.get('payment_file_id') else
             'Платёжка запрошена' if req.get('payment_pending_for') else 'Без платёжки'}
@@ -131,12 +132,15 @@ async def data_view(request):
     # Filter access before counting, searching or aggregating. Never truncate financial totals.
     rows = [r for r in db.list_all_requests(limit=-1) if comments.can_access(uid, r)]
     tasks = [{'key': k, 'label': TASKS[k], 'count': sum(matches(r, k, uid) for r in rows)} for k in task_keys(uid)]
-    response = {'ok': True, 'role': comments.user_role(uid), 'tasks': tasks, 'notifications': core.is_accountant(uid)}
+    response = {'ok': True, 'role': comments.user_role(uid), 'tasks': tasks, 'notifications': core.is_accountant(uid), 'manage_analytics': core.is_director(uid)}
     if view == 'tasks':
         key = data.get('task') or tasks[0]['key']
         if key not in task_keys(uid): return comments.error('bad_request', 400)
         rows = [r for r in rows if matches(r, key, uid)]
         response['task'] = key
+    elif view == 'excluded':
+        if not core.is_director(uid): return comments.error('not_allowed', 403)
+        rows = [r for r in rows if r.get('analytics_excluded')]
     elif view not in ('search', 'analytics'): return comments.error('bad_request', 400)
     if view != "tasks" and query.strip():
         q = query.strip().casefold()
@@ -147,7 +151,7 @@ async def data_view(request):
         now = datetime.now(config.TZ)
         try: start = period_start(data.get('period', 'month'), now)
         except ValueError: return comments.error('bad_request', 400)
-        rows = [r for r in rows if paid_in_period(r, start, now)]
+        rows = [r for r in rows if not r.get('analytics_excluded') and paid_in_period(r, start, now)]
         group = data.get('group', 'category')
         if group not in ('category', 'supplier', 'order'): return comments.error('bad_request', 400)
         def group_name(r):
@@ -160,8 +164,8 @@ async def data_view(request):
         if data.get('drill') is not None:
             if not isinstance(data['drill'], str): return comments.error('bad_request', 400)
             rows = groups.get(data['drill'], [])
-    response.update(count=len(rows), paid_total=total([r for r in rows if is_paid(r)]),
-        waiting_total=total([r for r in rows if matches(r, 'pay', uid)]),
+    response.update(count=len(rows), paid_total=total([r for r in rows if is_paid(r) and not r.get('analytics_excluded')]),
+        waiting_total=total([r for r in rows if matches(r, 'pay', uid) and not r.get('analytics_excluded')]),
         items=[public(r) for r in rows[offset:offset+40]],
         next_offset=offset+40 if offset+40 < len(rows) else None)
     return web.json_response(response)
@@ -187,7 +191,7 @@ async def detail(request):
     if req is None: return comments.error('not_found', 404)
     if not comments.can_access(uid, req): return comments.error('not_allowed', 403)
     return web.json_response({'ok': True, 'request': public(req), 'progress': core.progress_block(req),
-        'links': links(uid, req)})
+        'links': links(uid, req), 'manage_analytics': core.is_director(uid)})
 
 
 async def open_card(request):
@@ -214,8 +218,26 @@ async def open_card(request):
     return web.json_response({'ok': True})
 
 
+async def analytics_visibility(request):
+    data, uid, failure = await authenticate(request)
+    if failure is not None: return failure
+    if not core.is_director(uid): return comments.error('not_allowed', 403)
+    if type(data.get('excluded')) is not bool or data.get('confirmed') is not True:
+        return comments.error('bad_request', 400)
+    try: req_id = int(data['req'])
+    except (ValueError, TypeError, KeyError): return comments.error('bad_request', 400)
+    # Use the signed identity, never a client-supplied actor or role.
+    init = request.app['comments_verify'](data['initData'], config.BOT_TOKEN)
+    user = json.loads(init['user'])
+    name = ' '.join(p for p in [user.get('first_name'), user.get('last_name')] if p) or str(uid)
+    result = db.set_analytics_excluded(req_id, data['excluded'], uid, name)
+    if result == 'not_found': return comments.error('not_found', 404)
+    return web.json_response({'ok': True, 'excluded': data['excluded'], 'result': result})
+
+
 def register(app):
     app.router.add_get('/cabinet', page)
+    app.router.add_post('/cabinet_analytics_visibility', analytics_visibility)
     app.router.add_post('/cabinet_data', data_view)
     app.router.add_post('/cabinet_detail', detail)
     app.router.add_post('/cabinet_open', open_card)
