@@ -400,6 +400,12 @@ async def handle_buyer_request_submit(request: web.Request) -> web.Response:
     if not (core.is_buyer(uid) or core.is_driver(uid) or core.is_admin(uid) or core.is_accountant(uid)):
         return web.json_response({"ok": False, "error": "not_buyer"}, status=403)
 
+    request_type = fields.get("request_type", "procurement")
+    if request_type not in ("procurement", "admin"):
+        return web.json_response({"ok": False, "error": "bad_request"}, status=400)
+    if request_type == "admin" and not core.is_buyer(uid):
+        return web.json_response({"ok": False, "error": "not_buyer"}, status=403)
+
     supplier = fields.get("supplier", "").strip()
     naryad = fields.get("naryad", "").strip()
     if not supplier:
@@ -426,7 +432,7 @@ async def handle_buyer_request_submit(request: web.Request) -> web.Response:
     try:
         request_no = await core.publish_request(
             bot,
-            sector=config.SECTORS[0],
+            sector=config.ADMIN_SECTOR if request_type == "admin" else config.SECTORS[0],
             supplier=supplier,
             amount=amount,
             naryad=naryad,

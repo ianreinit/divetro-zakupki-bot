@@ -97,6 +97,12 @@ window.addEventListener('DOMContentLoaded', async () => {
   if (tg) { tg.ready(); tg.expand(); }
 
   const $ = (id) => document.getElementById(id);
+  const administrative = new URLSearchParams(location.search).get('type') === 'admin';
+  if (administrative) {
+    document.querySelector('h1').textContent = '🏢 Административная заявка';
+    document.querySelector('label[for="naryad"]').textContent = 'Назначение платежа';
+    $('naryad').placeholder = 'Например: аренда, связь, услуги';
+  }
 
   function showError(msg) { $("error").textContent = msg; $("error").style.display = "block"; }
   function clearError() { $("error").style.display = "none"; }
@@ -125,11 +131,12 @@ window.addEventListener('DOMContentLoaded', async () => {
 
     if (!supplier) return showError("Укажите поставщика.");
     if (!amountRaw || isNaN(Number(amountRaw))) return showError("Укажите сумму числом.");
-    if (!naryad) return showError("Укажите наряд / проект.");
+    if (!naryad) return showError(administrative ? "Укажите назначение платежа." : "Укажите наряд / проект.");
     if (!file) return showError("Прикрепите фото или PDF счёта.");
 
     const fd = new FormData();
     fd.append("initData", tg ? tg.initData : "");
+    fd.append("request_type", administrative ? "admin" : "procurement");
     fd.append("supplier", supplier);
     fd.append("amount", amountRaw);
     fd.append("naryad", naryad);

@@ -133,7 +133,10 @@ async def data_view(request):
     can_access = comments.access_checker(uid)
     rows = [r for r in db.list_all_requests(limit=-1) if can_access(r)]
     tasks = [{'key': k, 'label': TASKS[k], 'count': sum(matches(r, k, uid) for r in rows)} for k in task_keys(uid)]
-    response = {'ok': True, 'role': comments.user_role(uid), 'tasks': tasks, 'notifications': core.is_accountant(uid), 'manage_analytics': core.is_director(uid)}
+    create_actions = ([{'label': 'Подать потребность', 'url': 'form'},
+                       {'label': 'Административная заявка', 'url': 'admin_request'}]
+                      if core.is_director(uid) else [])
+    response = {'create_actions': create_actions, 'ok': True, 'role': comments.user_role(uid), 'tasks': tasks, 'notifications': core.is_accountant(uid), 'manage_analytics': core.is_director(uid)}
     if view == 'tasks':
         key = data.get('task') or tasks[0]['key']
         if key not in task_keys(uid): return comments.error('bad_request', 400)

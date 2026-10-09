@@ -17,7 +17,7 @@ log = logging.getLogger("zakupki-comments")
 def can_access(uid, req):
     privileged = core.is_admin(uid) or core.is_director(uid) or core.is_accountant(uid)
     if req["sector"] == config.ADMIN_SECTOR:
-        return privileged
+        return privileged or (core.is_buyer(uid) and uid == req['submitted_by_id'])
     if privileged or core.is_buyer(uid) or uid == req["submitted_by_id"]:
         return True
     if core.is_driver(uid) and req.get("driver_msg_id"):
@@ -39,7 +39,7 @@ def access_checker(uid):
     sector = person['sector'] if person else None
     def check(req):
         if req['sector'] == config.ADMIN_SECTOR:
-            return False
+            return buyer and uid == req['submitted_by_id']
         return bool(buyer or uid == req['submitted_by_id'] or
                     (driver and req.get('driver_msg_id')) or
                     (warehouse and req.get('warehouse_msg_id')) or

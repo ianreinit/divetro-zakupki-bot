@@ -229,6 +229,13 @@ class CabinetTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn('await window.telegramReady',html)
             self.assertNotIn('<script src="https://telegram.org',html)
 
+    async def test_director_can_open_both_creation_forms_from_cabinet(self):
+        for view in ('tasks','search','analytics'):
+            result=await self.get(11,view=view)
+            self.assertEqual([a['url'] for a in result['create_actions']],['form','admin_request'])
+        result=await self.get(60)
+        self.assertEqual(result['create_actions'],[])
+
     async def test_menu_available_to_admin_and_accountant(self):
         bot=SimpleNamespace(set_chat_menu_button=AsyncMock(),delete_my_commands=AsyncMock(),set_my_commands=AsyncMock())
         with patch.object(config,'CABINET_URL','https://example.com/cabinet'),patch.object(config,'NOTIFYAPP_URL','https://example.com/notify'):

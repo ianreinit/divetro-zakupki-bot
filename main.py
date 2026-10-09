@@ -64,11 +64,19 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if core.is_admin(user.id):
             new_hint = "потребность, заявку или административный платёж"
         elif core.is_buyer(user.id):
-            new_hint = "потребность или заявку"
+            new_hint = "потребность, обычную или административную заявку"
         elif core.is_driver(user.id):
             new_hint = "новую потребность, новую или административную заявку"
         else:
             new_hint = "подать потребность"
+        if core.is_director(user.id):
+            new_hint = "потребность или административную заявку"
+            rows = []
+            if config.WEBAPP_URL:
+                rows.append([InlineKeyboardButton("📋 Подать потребность", web_app=WebAppInfo(config.WEBAPP_URL))])
+            if config.ADMIN_REQUEST_URL:
+                rows.append([InlineKeyboardButton("🏢 Административная заявка", web_app=WebAppInfo(config.ADMIN_REQUEST_URL))])
+            kb = InlineKeyboardMarkup(rows) if rows else None
         if config.CABINET_URL:
             rows = list(kb.inline_keyboard) if kb else []
             rows.append([InlineKeyboardButton("Личный кабинет", web_app=WebAppInfo(config.CABINET_URL))])
@@ -136,7 +144,13 @@ def accountant_actions():
     return InlineKeyboardMarkup(rows)
 
 
+def reset_submission(context):
+    for key in ("sector", "order_no", "description", "needed_by", "urgency", "supplier", "amount", "naryad"):
+        context.user_data.pop(key, None)
+
+
 async def new_wizard(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    reset_submission(context)
     db.upsert_person(update.effective_user.id, update.effective_user.full_name)
     if not may_submit(update.effective_user.id):
         await update.message.reply_text(NOT_ALLOWED_MSG)
@@ -173,6 +187,10 @@ async def new_wizard(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             buttons.append([InlineKeyboardButton(
                 "📝 Новая заявка", callback_data="wiz:buyreq")])
+        buttons.append([InlineKeyboardButton(
+            "🏢 Административная заявка", web_app=WebAppInfo(config.BUYER_REQUEST_URL + "?type=admin"))
+            if config.BUYER_REQUEST_URL else InlineKeyboardButton(
+                "🏢 Административная заявка", callback_data="wiz:adm")])
         await update.message.reply_text("Что подаёте?", reply_markup=InlineKeyboardMarkup(buttons))
         return ORDER_NO
 
@@ -191,6 +209,7 @@ async def new_wizard(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def new_request(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    reset_submission(context)
     db.upsert_person(update.effective_user.id, update.effective_user.full_name)
     if not may_submit(update.effective_user.id):
         await update.message.reply_text(NOT_ALLOWED_MSG)
@@ -236,6 +255,10 @@ async def new_request(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             buttons.append([InlineKeyboardButton(
                 "📝 Новая заявка", callback_data="wiz:buyreq")])
+        buttons.append([InlineKeyboardButton(
+            "🏢 Административная заявка", web_app=WebAppInfo(config.BUYER_REQUEST_URL + "?type=admin"))
+            if config.BUYER_REQUEST_URL else InlineKeyboardButton(
+                "🏢 Административная заявка", callback_data="wiz:adm")])
         await update.message.reply_text(
             "Что подаёте?", reply_markup=InlineKeyboardMarkup(buttons))
         return ORDER_NO
@@ -293,9 +316,9 @@ async def wiz_type_chosen(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if choice == "adm":
         if not (core.is_director(query.from_user.id) or core.is_driver(query.from_user.id)
-                or core.is_admin(query.from_user.id)):
+                or core.is_admin(query.from_user.id) or core.is_buyer(query.from_user.id)):
             await query.edit_message_text(
-                "Эта категория доступна только водителю, директору или администратору.")
+                "Эта категория доступна закупщику, водителю, директору или администратору.")
             return ConversationHandler.END
         context.user_data["sector"] = config.ADMIN_SECTOR
         await query.edit_message_text("Административный платёж\n\nПоставщик?")
@@ -331,6 +354,9 @@ MAX_ORDER_NO = 100
 
 
 async def order_no_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if context.user_data.get("sector") not in config.SECTORS:
+        await update.message.reply_text("Сначала выберите тип заявки кнопкой или откройте форму ниже.")
+        return await new_request(update, context)
     text = update.message.text.strip()
     if not text:
         await update.message.reply_text("Укажите сток или номер заказа.")
@@ -392,7 +418,18 @@ async def urgency_chosen(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return NEED_PHOTO
 
 
+def need_data_complete(data):
+    return data.get("sector") in config.SECTORS and all(
+        data.get(key) for key in ("order_no", "description", "needed_by", "urgency"))
+
+
+INCOMPLETE_NEED = "Данные потребности не заполнены полностью. Откройте /new и выберите «Потребность»."
+
+
 async def need_photo_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not need_data_complete(context.user_data):
+        await update.message.reply_text(INCOMPLETE_NEED)
+        return ConversationHandler.END
     if update.message.photo:
         file_id = update.message.photo[-1].file_id
         is_doc = False
@@ -424,6 +461,9 @@ async def need_photo_received(update: Update, context: ContextTypes.DEFAULT_TYPE
 async def need_skip_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
+    if not need_data_complete(context.user_data):
+        await query.edit_message_text(INCOMPLETE_NEED)
+        return ConversationHandler.END
     data = context.user_data
     await core.publish_need(
         context.bot,
@@ -1589,6 +1629,7 @@ def build_application() -> Application:
                         CallbackQueryHandler(adm_skip_invoice, pattern=r"^adm:skip_invoice$")],
         },
         fallbacks=[CommandHandler("cancel", cancel)],
+        allow_reentry=True,
         conversation_timeout=600,
     )
 

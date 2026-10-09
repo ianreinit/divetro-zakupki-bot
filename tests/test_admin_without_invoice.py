@@ -15,6 +15,7 @@ from aiohttp import FormData
 from aiohttp.test_utils import TestClient, TestServer
 
 import config
+import comments
 import core
 import db
 import main
@@ -67,6 +68,52 @@ class AdminWithoutInvoiceTests(unittest.IsolatedAsyncioTestCase):
         if file:
             form.add_field("file", b"test", filename=file[0], content_type=file[1])
         return form
+
+    async def test_buyer_admin_request_requires_approval_and_has_no_logistics(self):
+        form=self.form(uid=40,purpose='Аренда',file=('invoice.pdf','application/pdf'))
+        form.add_field('request_type','admin')
+        response=await self.client.post('/buyer_request_submit',data=form)
+        self.assertEqual(response.status,200,await response.text())
+        req=db.get_by_id(1)
+        self.assertEqual(req['sector'],config.ADMIN_SECTOR)
+        self.assertTrue(req['request_no'].startswith('АДМ-'))
+        self.assertEqual(req['status'],'оформлено')
+        self.assertIsNone(req['approved_at'])
+        self.assertIsNone(req['accountant_msg_id'])
+        self.assertTrue(req['director_msg_id'])
+        with patch.object(core,'buyer_ids',return_value=[40,41]):
+            self.assertTrue(comments.can_access(40,req))
+            self.assertTrue(comments.access_checker(40)(req))
+            self.assertFalse(comments.can_access(41,req))
+            self.assertFalse(comments.access_checker(41)(req))
+        query=SimpleNamespace(answer=AsyncMock(),from_user=SimpleNamespace(full_name='Директор'))
+        await main._act_approve(query,SimpleNamespace(bot=self.bot),req,1,30,'2026-10-09T10:00:00')
+        with patch.object(core,'send_driver_card',new=AsyncMock()) as driver:
+            result=await core.apply_categorized_payment(self.bot,1,'rent',20,'Бухгалтер')
+            self.assertEqual(result,'updated')
+            driver.assert_not_awaited()
+        self.assertEqual(db.get_by_id(1)['status'],'оплачено')
+
+    async def test_buyer_admin_form_keeps_required_invoice_and_role_checks(self):
+        for uid,expected in [(40,400),(20,403),(50,403),(60,403),(99,403)]:
+            form=self.form(uid=uid,purpose='Аренда')
+            form.add_field('request_type','admin')
+            response=await self.client.post('/buyer_request_submit',data=form)
+            self.assertEqual(response.status,expected)
+        self.assertEqual(db.list_all_requests(),[])
+
+    async def test_buyer_menus_and_fallback_offer_admin_request(self):
+        update=SimpleNamespace(effective_user=SimpleNamespace(id=40,full_name='Закупщик'),
+                               message=SimpleNamespace(reply_text=AsyncMock()))
+        context=SimpleNamespace(user_data={})
+        with patch.object(config,'BUYER_REQUEST_URL','https://example.test/buyer_request_form'):
+            for handler in (main.new_request,main.new_wizard):
+                await handler(update,context)
+                buttons=update.message.reply_text.call_args.kwargs['reply_markup'].inline_keyboard
+                self.assertTrue(any(b.web_app and b.web_app.url.endswith('?type=admin') for row in buttons for b in row))
+        query=SimpleNamespace(data='wiz:adm',from_user=SimpleNamespace(id=40),answer=AsyncMock(),edit_message_text=AsyncMock())
+        self.assertEqual(await main.wiz_type_chosen(SimpleNamespace(callback_query=query),context), main.ADM_SUPPLIER)
+        self.assertEqual(context.user_data['sector'],config.ADMIN_SECTOR)
 
     async def create_request(self):
         response = await self.client.post("/admin_request_submit", data=self.form())
@@ -151,6 +198,16 @@ class AdminWithoutInvoiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(req["director_msg_id"])
         self.assertIsNone(req["accountant_msg_id"])
 
+    async def test_director_start_has_both_form_buttons(self):
+        update=SimpleNamespace(effective_user=SimpleNamespace(id=30,full_name='Директор',first_name='Директор'),
+                               message=SimpleNamespace(reply_text=AsyncMock()))
+        with patch.object(main,'apply_menu',new=AsyncMock()), patch.object(config,'WEBAPP_URL','https://example.test/form'):
+            await main.start(update,SimpleNamespace(bot=self.bot))
+            rows=update.message.reply_text.call_args.kwargs['reply_markup'].inline_keyboard
+            urls=[b.web_app.url for row in rows for b in row if b.web_app]
+            self.assertIn(config.ADMIN_REQUEST_URL,urls)
+            self.assertIn(config.WEBAPP_URL,urls)
+
     async def test_director_menu_and_wizard_skip(self):
         user = SimpleNamespace(id=30, full_name="Директор")
         update = SimpleNamespace(effective_user=user, message=SimpleNamespace(reply_text=AsyncMock(), text="3000"))
@@ -158,6 +215,7 @@ class AdminWithoutInvoiceTests(unittest.IsolatedAsyncioTestCase):
         await main.new_request(update, context)
         buttons = update.message.reply_text.call_args.kwargs["reply_markup"].inline_keyboard
         self.assertEqual(buttons[-1][0].web_app.url, config.ADMIN_REQUEST_URL)
+        context.user_data.update(sector=config.ADMIN_SECTOR, supplier="Иван")
         self.assertEqual(await main.adm_amount_received(update, context), main.ADM_NARYAD)
         query = SimpleNamespace(from_user=user, answer=AsyncMock(), edit_message_text=AsyncMock())
         update.callback_query = query

@@ -491,7 +491,8 @@ async def refresh_all_cards(bot, req):
     is_administrative = req["sector"] == config.ADMIN_SECTOR
     submitter_text = build_full_caption(req) if is_direct_request or is_administrative else text
     submitter_can_view = (not is_administrative or is_director(req["submitted_by_id"])
-                          or is_accountant(req["submitted_by_id"]) or is_admin(req["submitted_by_id"]))
+                          or is_accountant(req["submitted_by_id"]) or is_admin(req["submitted_by_id"])
+                          or is_buyer(req["submitted_by_id"]))
 
     # Карточка сотрудника (фото или текст)
     if submitter_can_view and submitter_card_is_media and req.get("notify_message_id"):
