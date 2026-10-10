@@ -60,7 +60,7 @@ CREATE TABLE IF NOT EXISTS audit_log (
 """
 
 
-CURRENT_SCHEMA_VERSION = 9
+CURRENT_SCHEMA_VERSION = 10
 
 
 def _add_col(conn, table, column, col_type):
@@ -167,6 +167,16 @@ def _migrate_to_v9(conn):
     _add_col(conn, "requests", "analytics_excluded", "INTEGER NOT NULL DEFAULT 0")
 
 
+def _migrate_to_v10(conn):
+    conn.execute("""CREATE TABLE IF NOT EXISTS cabinet_cards (
+        request_id INTEGER NOT NULL,
+        user_id INTEGER NOT NULL,
+        message_id INTEGER NOT NULL,
+        has_media INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (request_id, user_id)
+    )""")
+
+
 _MIGRATIONS = [
     (1, _migrate_to_v1),
     (2, _migrate_to_v2),
@@ -177,6 +187,7 @@ _MIGRATIONS = [
     (7, _migrate_to_v7),
     (8, _migrate_to_v8),
     (9, _migrate_to_v9),
+    (10, _migrate_to_v10),
 ]
 
 
@@ -744,6 +755,31 @@ def set_analytics_excluded(request_id, excluded, actor_id, actor_name):
             datetime.now(config.TZ).isoformat(timespec="seconds")))
         conn.commit()
         return "updated"
+
+
+def get_cabinet_card(request_id, user_id):
+    with closing(sqlite3.connect(DB_PATH)) as conn:
+        conn.row_factory = _dict_factory
+        return conn.execute(
+            "SELECT message_id, has_media FROM cabinet_cards WHERE request_id = ? AND user_id = ?",
+            (request_id, user_id),
+        ).fetchone()
+
+
+def set_cabinet_card(request_id, user_id, message_id, has_media):
+    with closing(sqlite3.connect(DB_PATH)) as conn:
+        conn.execute("""INSERT INTO cabinet_cards (request_id,user_id,message_id,has_media)
+            VALUES (?,?,?,?) ON CONFLICT(request_id,user_id) DO UPDATE SET
+            message_id=excluded.message_id, has_media=excluded.has_media""",
+            (request_id, user_id, message_id, int(has_media)))
+        conn.commit()
+
+
+def clear_cabinet_card(request_id, user_id):
+    with closing(sqlite3.connect(DB_PATH)) as conn:
+        conn.execute("DELETE FROM cabinet_cards WHERE request_id = ? AND user_id = ?",
+                     (request_id, user_id))
+        conn.commit()
 
 
 def bind_accountant_card(request_id, slot, chat_id, message_id):

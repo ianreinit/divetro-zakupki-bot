@@ -76,7 +76,7 @@ document.addEventListener('click',async e=>{const b=e.target.closest('button');i
  else if(b.id==='analytics-toggle'){$('analytics-confirm').hidden=false;b.hidden=true;}
  else if(b.id==='analytics-cancel'){$('analytics-confirm').hidden=true;$('analytics-toggle').hidden=false;}
  else if(b.id==='analytics-confirm-submit'&&!busy){const req=selected;busy=true;b.disabled=true;try{await api('cabinet_analytics_visibility',{req,excluded:b.dataset.excluded==='true',confirmed:true});if(selected===req)await detail(req);}catch(e){failure(e);}finally{busy=false;b.disabled=false;}}
- else if(b.id==='openchat'&&!busy){busy=true;b.disabled=true;try{await api('cabinet_open',{req:selected});$('status').textContent='Карточка отправлена в ваш чат с ботом.';tg?.close();}catch(e){failure(e);}finally{busy=false;b.disabled=false;}}
+ else if(b.id==='openchat'&&!busy){busy=true;b.disabled=true;try{const d=await api('cabinet_open',{req:selected});$('status').textContent=d.reused?'Карточка обновлена в вашем чате с ботом.':'Карточка отправлена в ваш чат с ботом.';tg?.close();}catch(e){failure(e);}finally{busy=false;b.disabled=false;}}
 });
 $('notifications').onclick=()=>{state.view='notifications';selected=null;state.drill=null;document.querySelectorAll('[data-view]').forEach(b=>b.setAttribute('aria-pressed','false'));load();};
 $('refresh').onclick=()=>selected?detail(selected):load();$('more').onclick=()=>load(true);load();

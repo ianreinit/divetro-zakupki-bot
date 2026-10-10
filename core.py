@@ -448,29 +448,37 @@ def _trim_caption(text: str) -> str:
 
 async def _edit_caption(bot, chat_id, msg_id, caption, reply_markup):
     if not chat_id or not msg_id:
-        return
+        return False
     try:
         await bot.edit_message_caption(
             chat_id=chat_id, message_id=msg_id, caption=_trim_caption(caption),
             reply_markup=reply_markup)
+        return True
     except BadRequest as e:
-        if "message is not modified" not in str(e).lower():
+        if "message is not modified" in str(e).lower():
+            return True
+        else:
             log.warning("edit_caption rejected %s/%s: %s", chat_id, msg_id, e)
     except Exception as e:
         log.warning("edit_caption failed %s/%s: %s", chat_id, msg_id, e)
+    return False
 
 
 async def _edit_text(bot, chat_id, msg_id, text, reply_markup):
     if not chat_id or not msg_id:
-        return
+        return False
     try:
         await bot.edit_message_text(
             chat_id=chat_id, message_id=msg_id, text=text, reply_markup=reply_markup)
+        return True
     except BadRequest as e:
-        if "message is not modified" not in str(e).lower():
+        if "message is not modified" in str(e).lower():
+            return True
+        else:
             log.warning("edit_text rejected %s/%s: %s", chat_id, msg_id, e)
     except Exception as e:
         log.warning("edit_text failed %s/%s: %s", chat_id, msg_id, e)
+    return False
 
 
 async def refresh_all_cards(bot, req):

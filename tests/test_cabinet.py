@@ -42,7 +42,9 @@ class CabinetTests(unittest.IsolatedAsyncioTestCase):
                     (i,f'REQ-{i}',sector,status,amount,owner,'2025-01-01',now if i in (2,3,5) else None,
                      '125' if i in (1,3) else None, 'materials' if i==3 else None))
             c.execute("UPDATE requests SET payment_pending_for='60' WHERE id=3")
-        self.bot=SimpleNamespace(send_message=AsyncMock(return_value=SimpleNamespace(message_id=8)))
+        self.bot=SimpleNamespace(
+            send_message=AsyncMock(return_value=SimpleNamespace(message_id=8)),
+            edit_message_text=AsyncMock(), edit_message_caption=AsyncMock())
         self.client=TestClient(TestServer(webserver.build_web_app(self.bot)))
         await self.client.start_server()
 
@@ -116,9 +118,15 @@ class CabinetTests(unittest.IsolatedAsyncioTestCase):
     async def test_open_card_only_sends_to_authenticated_caller(self):
         r=await self.client.post('/cabinet_open',json=self.payload(11,req=4,target_uid=999))
         self.assertEqual(r.status,200)
+        self.assertFalse((await r.json())['reused'])
         self.assertEqual(self.bot.send_message.call_args.args[0],11)
         kb=self.bot.send_message.call_args.kwargs['reply_markup']
         self.assertEqual(kb.inline_keyboard[0][0].callback_data,'act:approve:4')
+        r=await self.client.post('/cabinet_open',json=self.payload(11,req=4))
+        self.assertTrue((await r.json())['reused'])
+        self.bot.send_message.assert_awaited_once()
+        self.bot.edit_message_text.assert_awaited_once()
+        self.assertEqual(self.bot.edit_message_text.call_args.kwargs['message_id'],8)
 
     async def test_pagination_keeps_full_analytics_total(self):
         with sqlite3.connect(db.DB_PATH) as c:
@@ -185,6 +193,18 @@ class CabinetTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.get(11,view='excluded'))['count'],0)
         self.assertEqual(len(db.get_audit_log(3)),2)
         self.bot.send_message.assert_not_awaited()
+
+    async def test_excluded_pending_request_is_not_an_actionable_task_for_any_role(self):
+        self.assertEqual((await self.get(11,task='pay'))['count'],1)
+        self.assertEqual((await self.get(10,task='pay'))['count'],1)
+        self.assertEqual((await self.visibility(req=1)).status,200)
+        for uid in (10,11,20,30):
+            result=await self.get(uid,task='pay')
+            self.assertEqual(result['count'],0)
+            self.assertEqual(result['items'],[])
+        # It remains discoverable as history and can be restored by the director.
+        self.assertIn(1,[r['id'] for r in (await self.get(11,view='search'))['items']])
+        self.assertEqual((await self.get(11,view='excluded'))['count'],1)
 
     async def test_visibility_requires_confirmation_and_valid_request(self):
         for extra in ({'excluded':'false','confirmed':True},{'excluded':True,'confirmed':False},

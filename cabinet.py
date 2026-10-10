@@ -1,4 +1,5 @@
 """Role-scoped employee cabinet. No client-supplied roles or financial totals."""
+import asyncio
 import json
 from datetime import datetime, timedelta
 from decimal import Decimal
@@ -40,6 +41,10 @@ def task_keys(uid):
 
 
 def matches(req, key, uid):
+    # Исключённые тестовые заявки сохраняются в поиске, истории автора и
+    # отдельном разделе директора, но больше не являются рабочими задачами.
+    if req.get('analytics_excluded') and key != 'mine':
+        return False
     status = req['status']
     if key == 'approve': return status in ('оформлено', 'отправлено')
     if key == 'pay': return status == 'одобрено' and not req.get('paid_at')
@@ -199,7 +204,7 @@ async def detail(request):
 
 
 async def open_card(request):
-    """Only an explicit button press sends a current actionable card to its caller."""
+    """Send once, then refresh the caller's cabinet card instead of duplicating it."""
     data, uid, failure = await authenticate(request)
     if failure is not None: return failure
     try: req = db.get_by_id(int(data['req']))
@@ -215,11 +220,23 @@ async def open_card(request):
     if core.is_warehouse(uid) and req['sector'] != config.ADMIN_SECTOR: kb = core.kb_warehouse(req)
     media = req.get('photo_file_id') or req.get('need_photo_file_id')
     document = req.get('is_document') if req.get('photo_file_id') else req.get('need_is_document')
-    try:
-        await core._send_card(request.app['bot'], uid, media, core.build_full_caption(req), bool(document), reply_markup=kb)
-    except Exception:
-        return comments.error('send_failed', 502)
-    return web.json_response({'ok': True})
+    caption = core.build_full_caption(req)
+    # Serialize the read/update/send sequence so two rapid requests cannot both
+    # create a first copy before its message id is stored.
+    async with request.app['cabinet_open_lock']:
+        saved = db.get_cabinet_card(req['id'], uid)
+        if saved:
+            editor = core._edit_caption if saved['has_media'] else core._edit_text
+            if await editor(request.app['bot'], uid, saved['message_id'], caption, kb):
+                return web.json_response({'ok': True, 'reused': True})
+            db.clear_cabinet_card(req['id'], uid)
+        try:
+            message, _ = await core._send_card(
+                request.app['bot'], uid, media, caption, bool(document), reply_markup=kb)
+        except Exception:
+            return comments.error('send_failed', 502)
+        db.set_cabinet_card(req['id'], uid, message.message_id, bool(media))
+        return web.json_response({'ok': True, 'reused': False})
 
 
 async def analytics_visibility(request):
@@ -240,6 +257,7 @@ async def analytics_visibility(request):
 
 
 def register(app):
+    app['cabinet_open_lock'] = asyncio.Lock()
     app.router.add_get('/cabinet', page)
     app.router.add_post('/cabinet_analytics_visibility', analytics_visibility)
     app.router.add_post('/cabinet_data', data_view)
